@@ -11,8 +11,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from scipy.spatial import cKDTree
 
 from libs.read_write_model import read_cameras_binary, write_cameras_text, read_images_binary, write_images_text, read_points3D_binary, write_points3D_text
+from libs import cpu_mvs
 
 IMAGE_MAX_DIMENSION = 1024
+
+# COLMAP's patch match stereo needs CUDA, so the depth maps come from libs/cpu_mvs.py.
+# Those maps are noisier than the GPU ones, hence the relaxed fusion thresholds.
+DENSE_MIN_NUM_PIXELS = 3
+DENSE_MAX_NORMAL_ERROR = 25.0
 
 ##############################################################################
 # PRINT HELPERS
@@ -53,7 +59,11 @@ def print_step(message):
 def parse_args():
   parser = argparse.ArgumentParser(description="COLMAP SfM pipeline")
   parser.add_argument("--dataset", required=True, help="Path to dataset directory (e.g. storage/datasets/home)")
-  parser.add_argument("--reset", action="store_true", help="Reset the dataset by deleting existing images, database, and SFM reconstruction")
+  parser.add_argument("--reset", action="store_true", help="Reset the dataset by deleting existing images, database, SFM and dense reconstruction")
+  parser.add_argument("--dense-max-size", type=int, default=640, help="Max image dimension used to match depth maps: higher is denser and slower")
+  parser.add_argument("--dense-num-src", type=int, default=6, help="Number of source views matched against each image")
+  parser.add_argument("--dense-num-samples", type=int, default=128, help="Number of depth planes swept per image")
+  parser.add_argument("--dense-num-workers", type=int, default=None, help="Images matched in parallel (defaults to CPU count - 2)")
   return parser.parse_args()
 
 ##############################################################################
@@ -228,6 +238,67 @@ def build_sfm_reconstruction_transforms_json(images_path, sfm_path):
   print_success(f"SFM reconstruction exported to {sfm_transforms_json_path}.")
 
 ##############################################################################
+# BUILD DENSE WORKSPACE
+##############################################################################
+
+def build_dense_workspace(sfm_path, images_path, dense_path):
+  sfm_reconstruction_path = os.path.join(sfm_path, "0")
+  if not os.path.exists(sfm_reconstruction_path):
+    print_error(f"SFM reconstruction path {sfm_reconstruction_path} does not exist. Cannot build dense workspace.")
+    return False
+
+  if os.path.exists(os.path.join(dense_path, "sparse")):
+    print_info(f"Dense workspace {dense_path} already exists. Skipping undistortion.")
+    return True
+
+  print_info("Undistorting images into the dense workspace using pycolmap...")
+  pycolmap.undistort_images(dense_path, sfm_reconstruction_path, images_path)
+  print_success(f"Dense workspace prepared in {dense_path}.")
+  return True
+
+##############################################################################
+# BUILD DENSE DEPTH MAPS
+##############################################################################
+
+def build_dense_depth_maps(dense_path, max_image_size, num_src_images, num_samples, num_workers):
+  if not os.path.exists(os.path.join(dense_path, "sparse")):
+    print_error(f"Dense workspace {dense_path} does not exist. Cannot build depth maps.")
+    return
+
+  print_info("Estimating depth and normal maps on CPU (plane sweep, no CUDA required)...")
+  cpu_mvs.build_depth_maps(
+    dense_path,
+    max_image_size=max_image_size,
+    num_src_images=num_src_images,
+    num_samples=num_samples,
+    num_workers=num_workers,
+    log=print_info,
+  )
+  print_success("Depth and normal maps completed.")
+
+##############################################################################
+# BUILD DENSE POINT CLOUD
+##############################################################################
+
+def build_dense_point_cloud(dense_path):
+  depth_maps_path = os.path.join(dense_path, "stereo", "depth_maps")
+  if not os.path.exists(depth_maps_path) or not os.listdir(depth_maps_path):
+    print_error(f"Depth maps path {depth_maps_path} does not exist or is empty. Cannot fuse the dense point cloud.")
+    return
+
+  dense_ply_path = os.path.join(dense_path, "fused.ply")
+  if os.path.exists(dense_ply_path):
+    print_info(f"Dense point cloud {dense_ply_path} already exists. Skipping fusion.")
+    return
+
+  print_info("Fusing depth maps into a dense point cloud using pycolmap...")
+  options = pycolmap.StereoFusionOptions()
+  options.min_num_pixels = DENSE_MIN_NUM_PIXELS
+  options.max_normal_error = DENSE_MAX_NORMAL_ERROR
+  reconstruction = pycolmap.stereo_fusion(dense_ply_path, dense_path, input_type="geometric", options=options)
+  print_success(f"Dense point cloud with {len(reconstruction.points3D)} points exported to {dense_ply_path}.")
+
+##############################################################################
 # MAIN
 ##############################################################################
 
@@ -239,6 +310,7 @@ def main():
   images_path = os.path.join(dataset_path, 'images')
   database_path = os.path.join(dataset_path, 'database.db')
   sfm_path = os.path.join(dataset_path, 'sfm')
+  dense_path = os.path.join(dataset_path, 'dense')
 
   if not os.path.exists(dataset_path):
     print_error(f"Dataset path {dataset_path} does not exist.")
@@ -257,6 +329,8 @@ def main():
       os.remove(database_path)
     if os.path.exists(sfm_path):
       shutil.rmtree(sfm_path)
+    if os.path.exists(dense_path):
+      shutil.rmtree(dense_path)
 
   time_start = time.time()
   print_step("🚀 Build Images")
@@ -273,6 +347,13 @@ def main():
   build_sfm_reconstruction_txt(sfm_path)
   print_step("🚀 Build SFM Reconstruction transforms.json")
   build_sfm_reconstruction_transforms_json(images_path, sfm_path)
+
+  print_step("🚀 Build Dense Workspace")
+  if build_dense_workspace(sfm_path, images_path, dense_path):
+    print_step("🚀 Build Dense Depth Maps")
+    build_dense_depth_maps(dense_path, args.dense_max_size, args.dense_num_src, args.dense_num_samples, args.dense_num_workers)
+    print_step("🚀 Build Dense Point Cloud")
+    build_dense_point_cloud(dense_path)
 
   print_step("✅ Pipeline completed")
   time_end = time.time()
