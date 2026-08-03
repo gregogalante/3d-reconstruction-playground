@@ -13,3 +13,4 @@ python relocation.py --dataset storage/datasets/home --image storage/inputs/relo
 - https://github.com/naver/dust3r [https://www.perplexity.ai/search/running-colmap-dense-on-a-macb-l3mZtelGQxmjZizgbo49XA#1]
 - https://github.com/cvg/Hierarchical-Localization
 - https://github.com/freddewitt/CorbeauSplat?tab=readme-ov-file
+- https://github.com/OpsiClear/DepthDensifier
