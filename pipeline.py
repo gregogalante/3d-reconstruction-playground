@@ -199,14 +199,15 @@ def build_sfm_reconstruction_transforms_json(images_path, sfm_path):
     return
 
   print_info("Exporting SFM reconstruction to transforms.json using colmap2nerf...")
-  command = f"python colmap2nerf.py \
-    --colmap_matcher exhaustive \
-    --aabb_scale 16 \
-    --images {images_path} \
-    --text {sfm_reconstruction_path} \
-    --out {sfm_transforms_json_path} \
-  "
-  os.system(command)
+  command = [
+    sys.executable, "-m", "libs.colmap2nerf",
+    "--colmap_matcher", "exhaustive",
+    "--aabb_scale", "16",
+    "--images", os.path.abspath(images_path),
+    "--text", os.path.abspath(sfm_reconstruction_path),
+    "--out", os.path.abspath(sfm_transforms_json_path),
+  ]
+  subprocess.run(command, cwd=os.path.dirname(os.path.abspath(__file__)))
 
   if not os.path.exists(sfm_transforms_json_path):
     print_error(f"Failed to export transforms.json to {sfm_transforms_json_path}.")

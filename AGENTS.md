@@ -36,6 +36,9 @@ python server.py
 - `libs/console.py` — the coloured `print_*` helpers shared with the subprocess.
 - `libs/ply.py` — numpy PLY vertex I/O, torch free so `server.py` can use it too.
 - `libs/read_write_model.py` — COLMAP model text/binary I/O (upstream script).
+- `libs/colmap2nerf.py` — COLMAP model to `transforms.json` (upstream instant-ngp
+  script, kept as is). Run as `python -m libs.colmap2nerf`: it has no main guard, so
+  importing it would execute it.
 - `relocation.py` — localise a query image against an existing reconstruction.
 - `server.py` + `ui/` — FastAPI backend and viewer. `/api/datasets/<name>/clouds`
   reports which of the sparse, dense and splat clouds exist, the UI lets you switch
