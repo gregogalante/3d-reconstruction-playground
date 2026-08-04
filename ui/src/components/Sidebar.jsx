@@ -2,12 +2,13 @@ import DatasetList from './DatasetList';
 import CloudList from './CloudList';
 import ImageList from './ImageList';
 import RelocationList from './RelocationList';
+import RelocateForm from './RelocateForm';
 
 export default function Sidebar({
   datasets, selectedDataset, onSelectDataset,
   clouds, selectedCloud, onSelectCloud,
   cameras, activeImages, onToggleImage, onSelectAll, onClearAll,
-  relocations, showRelocations, onToggleRelocations,
+  relocations, showRelocations, onToggleRelocations, onRelocated, onOpenOverlay,
 }) {
   return (
     <div className="w-80 bg-gray-900 border-r border-gray-800 flex flex-col overflow-hidden">
@@ -45,15 +46,20 @@ export default function Sidebar({
               />
             </Section>
 
-            {relocations.length > 0 && (
-              <Section title="Relocations">
-                <RelocationList
-                  relocations={relocations}
-                  show={showRelocations}
-                  onToggleShow={onToggleRelocations}
-                />
-              </Section>
-            )}
+            <Section title="Relocations">
+              {/* keyed so switching dataset drops the error of the previous one */}
+              <RelocateForm key={selectedDataset} dataset={selectedDataset} onRelocated={onRelocated} />
+              {relocations.length > 0 && (
+                <div className="mt-2">
+                  <RelocationList
+                    relocations={relocations}
+                    show={showRelocations}
+                    onToggleShow={onToggleRelocations}
+                    onOpenOverlay={onOpenOverlay}
+                  />
+                </div>
+              )}
+            </Section>
           </>
         )}
       </div>

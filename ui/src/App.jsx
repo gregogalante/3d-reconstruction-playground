@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
-import { fetchDatasets, fetchCameras, fetchClouds, fetchRelocations } from './api';
+import { fetchDatasets, fetchCameras, fetchClouds, fetchRelocations, relocationOverlayUrl } from './api';
 import Sidebar from './components/Sidebar';
 import Viewer3D from './components/Viewer3D';
+import ImageModal from './components/ImageModal';
 
 function App() {
   const [datasets, setDatasets] = useState([]);
@@ -12,6 +13,7 @@ function App() {
   const [activeImages, setActiveImages] = useState(new Set());
   const [relocations, setRelocations] = useState([]);
   const [showRelocations, setShowRelocations] = useState(true);
+  const [overlay, setOverlay] = useState(null);
 
   useEffect(() => {
     fetchDatasets().then(setDatasets);
@@ -53,6 +55,12 @@ function App() {
     setActiveImages(new Set());
   }, []);
 
+  // a fresh relocation shows its overlay straight away, it is what tells you it worked
+  const handleRelocated = useCallback(async relocation => {
+    setRelocations(await fetchRelocations());
+    setOverlay(relocation);
+  }, []);
+
   const filteredRelocations = relocations.filter(
     r => r.dataset_name === selectedDataset && r.success
   );
@@ -74,6 +82,8 @@ function App() {
         relocations={filteredRelocations}
         showRelocations={showRelocations}
         onToggleRelocations={() => setShowRelocations(v => !v)}
+        onRelocated={handleRelocated}
+        onOpenOverlay={setOverlay}
       />
       <div className="flex-1 relative">
         {selectedDataset ? (
@@ -90,6 +100,14 @@ function App() {
           </div>
         )}
       </div>
+
+      {overlay && (
+        <ImageModal
+          src={relocationOverlayUrl(overlay.folder, overlay.name)}
+          title={overlay.name}
+          onClose={() => setOverlay(null)}
+        />
+      )}
     </div>
   );
 }

@@ -28,7 +28,12 @@ python server.py
 ## Layout
 
 - `pipeline.py` — SfM + dense pipeline, one function per step, all steps skip work
-  that already exists on disk (`--reset` to rebuild).
+  that already exists on disk (`--reset` to rebuild). Two constants at the top:
+  `IMAGE_MAX_DIMENSION` and `IMAGE_MAX_ITEMS`, the cap on how many photos of `train/`
+  reach `images/`. Over the cap the capture is decimated uniformly rather than cut
+  short (400 photos capped at 300 keep three and skip one), so the scene stays
+  covered; 0 disables it. Both land in `config.json`, and changing either needs
+  `--reset` since `build_images` skips a non empty `images/`.
 - `libs/cpu_mvs.py` — CPU multi-view stereo (see below).
 - `libs/cpu_splatting.py` — CPU gaussian splatting: rasteriser, training, PLY export.
 - `libs/splat_trainer.py` — runnable trainer (`python -m libs.splat_trainer`), launched
@@ -159,6 +164,17 @@ image dataset, so there is no pipeline artifact to keep in sync.
    Both panels share the viewpoint, so the lines are parallel when the pose is right
    and fan out when it is not; they run green to red over the RANSAC threshold. The UI
    opens it from the relocation list.
+
+A pose under `min_inliers` (30, COLMAP's own threshold for registering an image) is
+reported as a failure: RANSAC always finds some minimal set that agrees, so a photo of
+another scene still comes back with a pose. Localising a `home` photo against `banana`
+gives 5 inliers out of 97 and used to be stored as a success.
+
+`relocation.relocate()` is the whole flow as one call, shared by the CLI and by
+`POST /api/datasets/<name>/relocate`, which the viewer's "Locate a photo" button posts
+an upload to. The endpoint writes into `storage/relocations/<dataset>/` exactly like
+the CLI, deletes what it wrote when the pose is rejected, and answers 422 with the
+reason. Importing `relocation` from `server.py` is safe, neither pulls in torch.
 
 What actually mattered, measured against the table in [README.md](README.md):
 

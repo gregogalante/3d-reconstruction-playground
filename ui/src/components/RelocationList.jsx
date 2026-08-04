@@ -1,10 +1,4 @@
-import { useState } from 'react';
-import ImageModal from './ImageModal';
-import { relocationOverlayUrl } from '../api';
-
-export default function RelocationList({ relocations, show, onToggleShow }) {
-  const [opened, setOpened] = useState(null);
-
+export default function RelocationList({ relocations, show, onToggleShow, onOpenOverlay }) {
   return (
     <div>
       <label className="flex items-center gap-2 mb-2 text-xs text-gray-400 cursor-pointer">
@@ -31,7 +25,7 @@ export default function RelocationList({ relocations, show, onToggleShow }) {
             {rel.has_overlay && (
               <button
                 type="button"
-                onClick={() => setOpened(rel)}
+                onClick={() => onOpenOverlay(rel)}
                 className="mt-1 ml-4 text-gray-600 hover:text-gray-300 underline"
               >
                 verification overlay
@@ -40,14 +34,6 @@ export default function RelocationList({ relocations, show, onToggleShow }) {
           </div>
         ))}
       </div>
-
-      {opened && (
-        <ImageModal
-          src={relocationOverlayUrl(opened.folder, opened.name)}
-          title={opened.name}
-          onClose={() => setOpened(null)}
-        />
-      )}
     </div>
   );
 }

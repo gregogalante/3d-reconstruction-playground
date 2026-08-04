@@ -82,6 +82,7 @@ def build_relocation_data(result, image_path, dataset_path, camera, camera_sourc
     "query_image": os.path.abspath(image_path),
     "dataset": os.path.abspath(dataset_path),
     "success": bool(result.get("success")),
+    "reason": result.get("reason"),
     "num_correspondences": result.get("num_correspondences", 0),
     "retrieved_images": result.get("retrieved", []),
     "camera_source": camera_source,
@@ -202,24 +203,16 @@ def save_output(output_dir, image_path, query_path, relocation_data, dataset_pat
                   os.path.join(output_dir, f"{name}_overlay.jpg"))
 
 ##############################################################################
-# MAIN
+# RELOCATE
 ##############################################################################
 
-def main():
-  args = parse_args()
-  dataset_path = args.dataset
-  database_path = os.path.join(dataset_path, "database.db")
+def relocate(dataset_path, image_path, output_dir=None, retrieved=10, ratio=0.8,
+             max_error=4.0, use_dense=False):
+  """Locate one photo in a dataset, and write the JSON and the overlay if asked to.
 
-  for path, label in [(dataset_path, "dataset"), (database_path, "database"), (args.image, "query image")]:
-    if not os.path.exists(path):
-      print_error(f"{label} not found: {path}")
-      sys.exit(1)
-
-  config_path = os.path.join(dataset_path, "config.json")
-  if not os.path.exists(config_path):
-    print_error(f"config.json not found in {dataset_path}. Run pipeline.py first.")
-    sys.exit(1)
-  with open(config_path) as handle:
+  Returns the relocation data, the same dict that lands in the JSON.
+  """
+  with open(os.path.join(dataset_path, "config.json")) as handle:
     image_max_dimension = json.load(handle)["image_max_dimension"]
 
   reconstruction = pycolmap.Reconstruction(os.path.join(dataset_path, "sfm", "0"))
@@ -228,7 +221,7 @@ def main():
   tmp_dir = tempfile.mkdtemp(prefix="reloc_")
   try:
     print_step("Prepare Query Image")
-    query_path, size = prepare_query_image(args.image, tmp_dir, image_max_dimension)
+    query_path, size = prepare_query_image(image_path, tmp_dir, image_max_dimension)
 
     print_step("Extract Query Features")
     keypoints, descriptors = extract_query_features(query_path)
@@ -239,19 +232,17 @@ def main():
       exif_camera = pycolmap.infer_camera_from_image(query_path)
     except Exception:
       pass
-    camera, camera_source = query_camera(reconstruction, size, os.path.basename(args.image), exif_camera)
+    camera, camera_source = query_camera(reconstruction, size, os.path.basename(image_path), exif_camera)
     print_info(f"Camera from {camera_source}: {camera.model.name} {camera.width}x{camera.height} "
                f"f={camera.params[0]:.1f}")
 
     print_step("Localize")
-    result = localize(dataset_path, keypoints, descriptors, camera,
-                      num_retrieved=args.retrieved, ratio=args.ratio,
-                      max_error=args.max_error, use_dense=args.dense,
-                      log=print_info)
+    result = localize(dataset_path, keypoints, descriptors, camera, num_retrieved=retrieved,
+                      ratio=ratio, max_error=max_error, use_dense=use_dense, log=print_info)
 
     print_step("Results")
     if not result["success"]:
-      print_error(f"Pose estimation failed with {result['num_correspondences']} correspondences")
+      print_error(f"Pose estimation failed: {result['reason']}")
     else:
       center = -result["cam_from_world"].rotation.matrix().T @ result["cam_from_world"].translation
       print_success("Pose estimated")
@@ -260,17 +251,36 @@ def main():
                  f"{result['reprojection_error']:.2f} px")
       print_info(f"  Camera center: [{center[0]:.4f}, {center[1]:.4f}, {center[2]:.4f}]")
       # the inlier ratio is not a quality signal here, correspondences are collected
-      # generously on purpose, but a thin or badly fitting inlier set is
-      if result["num_inliers"] < 30 or result["reprojection_error"] > 2.0:
+      # generously on purpose, but a badly fitting inlier set is
+      if result["reprojection_error"] > 2.0:
         print_warning("Weak support: check the overlay before trusting this pose")
 
-    if args.output:
-      data = build_relocation_data(result, args.image, dataset_path, camera, camera_source)
-      save_output(args.output, args.image, query_path, data, dataset_path, result, camera, args.max_error)
-
-    sys.exit(0 if result["success"] else 1)
+    data = build_relocation_data(result, image_path, dataset_path, camera, camera_source)
+    if output_dir:
+      save_output(output_dir, image_path, query_path, data, dataset_path, result, camera, max_error)
+    return data
   finally:
     shutil.rmtree(tmp_dir, ignore_errors=True)
+
+##############################################################################
+# MAIN
+##############################################################################
+
+def main():
+  args = parse_args()
+  database_path = os.path.join(args.dataset, "database.db")
+  config_path = os.path.join(args.dataset, "config.json")
+
+  for path, label in [(args.dataset, "dataset"), (database_path, "database"),
+                      (args.image, "query image"),
+                      (config_path, "config.json (run pipeline.py first)")]:
+    if not os.path.exists(path):
+      print_error(f"{label} not found: {path}")
+      sys.exit(1)
+
+  data = relocate(args.dataset, args.image, args.output, retrieved=args.retrieved,
+                  ratio=args.ratio, max_error=args.max_error, use_dense=args.dense)
+  sys.exit(0 if data["success"] else 1)
 
 
 if __name__ == "__main__":

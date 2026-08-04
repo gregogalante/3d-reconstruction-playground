@@ -294,9 +294,14 @@ def image_points(reconstruction, image, keypoints, dense=None, name=None):
 
 
 def localize(dataset_path, keypoints, descriptors, camera, num_retrieved=10, ratio=0.8,
-             max_error=4.0, use_dense=False, min_focal_inliers=50, enough=800, min_images=4,
-             log=print):
-  """Estimate the pose of a query image against the dataset's reconstruction."""
+             max_error=4.0, use_dense=False, min_inliers=30, min_focal_inliers=50,
+             enough=800, min_images=4, log=print):
+  """Estimate the pose of a query image against the dataset's reconstruction.
+
+  A photo of another scene still produces a pose, RANSAC will always find some minimal
+  set that agrees, so a registration under `min_inliers` counts as a failure. That is
+  COLMAP's own threshold for accepting an image into a reconstruction.
+  """
   reconstruction = pycolmap.Reconstruction(os.path.join(dataset_path, "sfm", "0"))
   names, db_keypoints, db_descriptors = read_database(os.path.join(dataset_path, "database.db"))
   descriptors = descriptors.astype(np.float32)
@@ -338,8 +343,12 @@ def localize(dataset_path, keypoints, descriptors, camera, num_retrieved=10, rat
       if current is None or distance < current[0]:
         best[query] = (distance, points[slot], bool(sparse[slot]))
 
+  def failure(reason, inliers=0):
+    return {"success": False, "reason": reason, "num_inliers": inliers,
+            "num_correspondences": len(best), "retrieved": [names[i] for i in retrieved]}
+
   if len(best) < 4:
-    return {"success": False, "num_correspondences": len(best), "retrieved": [names[i] for i in retrieved]}
+    return failure(f"only {len(best)} correspondences, PnP needs at least 4")
 
   query_idx = np.array(sorted(best))
   points2D = keypoints[query_idx, :2].astype(np.float64)
@@ -352,7 +361,7 @@ def localize(dataset_path, keypoints, descriptors, camera, num_retrieved=10, rat
   options.ransac.max_error = max_error
   result = pycolmap.estimate_and_refine_absolute_pose(points2D, points3D, camera, options)
   if result is None:
-    return {"success": False, "num_correspondences": len(best), "retrieved": [names[i] for i in retrieved]}
+    return failure(f"PnP found no pose over {len(best)} correspondences")
 
   cam_from_world = result["cam_from_world"]
   inliers = np.asarray(result["inlier_mask"], bool)
@@ -361,6 +370,10 @@ def localize(dataset_path, keypoints, descriptors, camera, num_retrieved=10, rat
     cam_from_world, inliers = refine_intrinsics(cam_from_world, points2D, points3D, inliers, camera, max_error)
     log(f"Refined the focal length from {focal:.1f} to {camera.params[0]:.1f} px, "
         f"{int(inliers.sum())} inliers")
+
+  if inliers.sum() < min_inliers:
+    return failure(f"{int(inliers.sum())} inliers out of {len(best)} correspondences, "
+                   f"under the {min_inliers} needed to trust a pose", int(inliers.sum()))
 
   projected = camera.img_from_cam(cam_from_world * points3D[inliers])
   residuals = np.linalg.norm(np.asarray(projected) - points2D[inliers], axis=1)

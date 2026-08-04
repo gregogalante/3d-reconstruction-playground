@@ -7,6 +7,12 @@ python pipeline.py --dataset storage/datasets/home --reset
 python relocation.py --dataset storage/datasets/home --image storage/inputs/relocation_home.jpg --output storage/relocations/home
 ```
 
+`IMAGE_MAX_ITEMS` in [pipeline.py](pipeline.py) caps how many photos of `train/` are
+used, 300 by default. Matching is quadratic in their number, so a denser capture costs
+much more than it adds; over the cap the photos are decimated uniformly (400 capped at
+300 keeps three and skips one) instead of cutting the tail, which would leave a hole in
+the scene. Set it to 0 to use them all.
+
 ## Dense reconstruction
 
 The pipeline ends with a dense reconstruction that runs entirely on CPU (COLMAP's
@@ -80,6 +86,11 @@ is then exact ground truth. Position error as a percentage of the scene radius:
 
 Every query lands within 2% of the scene radius and 2°, none did before. See
 [AGENTS.md](AGENTS.md) for what changed and what did not help.
+
+The viewer does the same thing without the command line: pick a dataset, hit **Locate a
+photo** in the Relocations panel, and the upload comes back as a red frustum in the
+scene with its overlay opened. A photo the dataset does not contain is rejected rather
+than placed somewhere plausible.
 
 ## Util links
 

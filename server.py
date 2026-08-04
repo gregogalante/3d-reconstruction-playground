@@ -1,17 +1,21 @@
+import re
 import math
 import json
+import shutil
+import tempfile
 from pathlib import Path
 from functools import lru_cache
 
 import numpy as np
 import pycolmap
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
 from libs.ply import read_ply, read_header
+from relocation import relocate
 
 app = FastAPI()
 app.add_middleware(
@@ -168,6 +172,45 @@ def ply_to_splat(path: Path) -> bytes:
     quaternions /= np.maximum(np.linalg.norm(quaternions, axis=1, keepdims=True), 1e-12)
     rows["rotation"] = np.clip(quaternions * 128.0 + 128.0, 0, 255)
     return rows.tobytes()
+
+
+UPLOAD_SUFFIXES = {".jpg", ".jpeg", ".png"}
+
+
+def safe_name(filename: str) -> Path:
+    """An upload name that cannot escape the folder it is written to."""
+    original = Path(filename or "query")
+    stem = re.sub(r"[^A-Za-z0-9._-]", "_", original.stem).strip("._-") or "query"
+    suffix = original.suffix.lower() if original.suffix.lower() in UPLOAD_SUFFIXES else ".jpg"
+    return Path(stem).with_suffix(suffix)
+
+
+@app.post("/api/datasets/{name}/relocate")
+async def post_relocation(name: str, file: UploadFile = File(...)):
+    """Locate an uploaded photo in a dataset, storing it the way relocation.py does."""
+    dataset_path = DATASETS / name
+    if not (dataset_path / "config.json").exists():
+        raise HTTPException(404, f"Dataset {name} has no reconstruction, run pipeline.py first")
+
+    upload_dir = Path(tempfile.mkdtemp(prefix="upload_"))
+    query_path = upload_dir / safe_name(file.filename)
+    try:
+        query_path.write_bytes(await file.read())
+        try:
+            data = relocate(str(dataset_path), str(query_path), str(RELOCATIONS / name))
+        except Exception as error:
+            raise HTTPException(422, f"Could not localise the photo: {error}")
+    finally:
+        shutil.rmtree(upload_dir, ignore_errors=True)
+
+    if not data["success"]:
+        # a failed attempt is noise in the viewer, unlike on the command line
+        for leftover in (RELOCATIONS / name).glob(f"{query_path.stem}.*"):
+            leftover.unlink(missing_ok=True)
+        if not any((RELOCATIONS / name).iterdir()):
+            (RELOCATIONS / name).rmdir()
+        raise HTTPException(422, f"Not found in {name}: {data['reason']}")
+    return {"name": query_path.stem, "folder": name}
 
 
 @app.get("/api/relocations")
