@@ -374,8 +374,35 @@ def prune(params, optimizer, scene_extent, min_opacity=0.005, max_scale_ratio=0.
         params[name] = pruned
   return params, optimizer, removed
 
-def train(params, views, iterations, capacity, background=0.0, prune_every=500, seed=0, log=print, log_every=100):
-  """Optimise the gaussians against the training views. Returns the training history."""
+def downscale_views(views, factor=0.5):
+  """The same views at a lower resolution, used to warm the training up cheaply."""
+  scaled = []
+  for view in views:
+    # resized on the cpu: the mps adaptive pool rejects non divisible sizes
+    image = F.interpolate(view["image"][None].cpu(), scale_factor=factor, mode="area")[0].to(view["image"].device)
+    height, width = image.shape[-2:]
+    scale_x, scale_y = width / view["size"][1], height / view["size"][0]
+    scaled.append(dict(
+      view,
+      image=image,
+      size=(height, width),
+      focal=(view["focal"][0] * scale_x, view["focal"][1] * scale_y),
+      principal=((view["principal"][0] + 0.5) * scale_x - 0.5, (view["principal"][1] + 0.5) * scale_y - 0.5),
+    ))
+  return scaled
+
+def train(params, views, iterations, capacity, background=0.0, prune_every=500, seed=0,
+          warmup=0.5, warmup_scale=0.5, log=print, log_every=100):
+  """Optimise the gaussians against the training views. Returns the training history.
+
+  The first `warmup` fraction of the iterations runs on half resolution views, where
+  a step costs a quarter: measured on two datasets it cuts a third of the training
+  time and leaves the holdout quality unchanged (see AGENTS.md).
+
+  The reference implementation also decays the position learning rate, which is a
+  loss here: its schedule spans 30k iterations, and compressing it into a couple of
+  thousand starves the positions long before they have settled.
+  """
   with torch.no_grad():
     center = params["means"].mean(dim=0)
     scene_extent = float((params["means"] - center).norm(dim=1).max())
@@ -383,10 +410,16 @@ def train(params, views, iterations, capacity, background=0.0, prune_every=500, 
   window = _gaussian_window(device=params["means"].device)
   generator = torch.Generator().manual_seed(seed)
 
+  warmup_iterations = round(iterations * warmup)
+  warmup_views = downscale_views(views, warmup_scale) if warmup_iterations else []
+  if warmup_iterations:
+    log(f"warming up for {warmup_iterations} iterations at {warmup_views[0]['size'][1]}x{warmup_views[0]['size'][0]}")
+
   history = []
   started = time.time()
   for iteration in range(1, iterations + 1):
-    view = views[int(torch.randint(len(views), (1,), generator=generator))]
+    active = warmup_views if iteration <= warmup_iterations else views
+    view = active[int(torch.randint(len(active), (1,), generator=generator))]
     prediction = render(params, view, background=background, capacity=capacity)
     loss = photometric_loss(prediction, view["image"], window=window)
 

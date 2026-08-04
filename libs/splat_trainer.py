@@ -25,8 +25,9 @@ def parse_args():
   parser.add_argument("--max-size", type=int, default=400, help="Max image dimension used for training: higher is sharper and slower")
   parser.add_argument("--max-gaussians", type=int, default=60000, help="Upper bound on the gaussians sampled from the dense point cloud")
   parser.add_argument("--capacity", type=int, default=64, help="Gaussians composited per tile, front to back")
+  parser.add_argument("--warmup", type=float, default=0.5, help="Fraction of the iterations trained on half resolution views (0 disables)")
   parser.add_argument("--holdout", type=int, default=8, help="Keep every Nth view out of training to measure novel view quality (0 disables)")
-  parser.add_argument("--device", default="cpu", choices=["cpu", "mps"], help="Torch device: mps uses the Apple GPU, ~2.5x faster")
+  parser.add_argument("--device", default="cpu", choices=["cpu", "mps"], help="Torch device. Same results either way, but mps is ~3x slower here: the compositing loop syncs with the host on every chunk")
   parser.add_argument("--threads", type=int, default=None, help="Torch CPU threads (defaults to CPU count - 2)")
   return parser.parse_args()
 
@@ -87,7 +88,7 @@ def main():
   print_info(f"Before training: psnr {initial_psnr:.2f} dB, ssim {initial_ssim:.4f}")
 
   gaussians, history = cpu_splatting.train(
-    gaussians, train_views, args.iterations, capacity=args.capacity, log=print_info,
+    gaussians, train_views, args.iterations, capacity=args.capacity, warmup=args.warmup, log=print_info,
   )
 
   train_psnr, train_ssim = cpu_splatting.evaluate(gaussians, train_views, args.capacity)
@@ -107,6 +108,7 @@ def main():
     "gaussians": len(gaussians["means"]),
     "max_image_size": args.max_size,
     "capacity": args.capacity,
+    "warmup": args.warmup,
     "device": device,
     "seconds": round(time.time() - time_start, 1),
     "initial": {"psnr": initial_psnr, "ssim": initial_ssim},

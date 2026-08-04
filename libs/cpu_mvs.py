@@ -487,7 +487,9 @@ def build_depth_maps(
   reconstruction = pycolmap.Reconstruction(os.path.join(workspace_path, "sparse"))
   context["reconstruction"] = reconstruction
   image_ids = sorted(reconstruction.images, key=lambda image_id: reconstruction.images[image_id].name)
-  workers = num_workers or max(1, (os.cpu_count() or 4) - 2)
+  # slight oversubscription: each worker alternates between single threaded numpy
+  # sections and multi threaded OpenCV calls, and the extra workers fill the gaps
+  workers = num_workers or (os.cpu_count() or 4) + 2
   log(f"CPU MVS on {len(image_ids)} images (size={max_image_size}, samples={num_samples}, src={num_src_images}, workers={workers})")
 
   context["view_graph"] = build_view_graph(reconstruction, num_src_images)

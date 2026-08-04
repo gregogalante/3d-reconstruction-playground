@@ -32,13 +32,14 @@ def parse_args():
   parser.add_argument("--dense-max-size", type=int, default=640, help="Max image dimension used to match depth maps: higher is denser and slower")
   parser.add_argument("--dense-num-src", type=int, default=6, help="Number of source views matched against each image")
   parser.add_argument("--dense-num-samples", type=int, default=128, help="Number of depth planes swept per image")
-  parser.add_argument("--dense-num-workers", type=int, default=None, help="Images matched in parallel (defaults to CPU count - 2)")
+  parser.add_argument("--dense-num-workers", type=int, default=None, help="Images matched in parallel (defaults to CPU count + 2)")
   parser.add_argument("--splat-iterations", type=int, default=2000, help="Gaussian splatting optimization steps")
   parser.add_argument("--splat-max-size", type=int, default=400, help="Max image dimension used to train the splat: higher is sharper and slower")
   parser.add_argument("--splat-max-gaussians", type=int, default=60000, help="Upper bound on the gaussians sampled from the dense point cloud")
   parser.add_argument("--splat-capacity", type=int, default=64, help="Gaussians composited per tile, front to back")
+  parser.add_argument("--splat-warmup", type=float, default=0.5, help="Fraction of the splat iterations trained on half resolution views (0 disables)")
   parser.add_argument("--splat-holdout", type=int, default=8, help="Keep every Nth view out of the splat training to measure novel view quality (0 disables)")
-  parser.add_argument("--splat-device", default="cpu", choices=["cpu", "mps"], help="Torch device used to train the splat")
+  parser.add_argument("--splat-device", default="cpu", choices=["cpu", "mps"], help="Torch device used to train the splat (mps is slower here, see AGENTS.md)")
   return parser.parse_args()
 
 ##############################################################################
@@ -298,6 +299,7 @@ def build_splat(dataset_path, args):
     "--max-size", str(args.splat_max_size),
     "--max-gaussians", str(args.splat_max_gaussians),
     "--capacity", str(args.splat_capacity),
+    "--warmup", str(args.splat_warmup),
     "--holdout", str(args.splat_holdout),
     "--device", args.splat_device,
   ]
