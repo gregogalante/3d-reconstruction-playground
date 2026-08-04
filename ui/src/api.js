@@ -20,8 +20,18 @@ export function imageUrl(dataset, filename) {
   return `/api/datasets/${dataset}/images/${filename}`;
 }
 
-export function plyUrl(dataset) {
-  return `/api/datasets/${dataset}/reconstruction.ply`;
+export async function fetchClouds(dataset) {
+  const res = await fetch(`/api/datasets/${dataset}/clouds`);
+  const data = await res.json();
+  return data.clouds;
+}
+
+export function cloudUrl(dataset, kind) {
+  return `/api/datasets/${dataset}/clouds/${kind}.ply`;
+}
+
+export function splatUrl(dataset) {
+  return `/api/datasets/${dataset}/splat.splat`;
 }
 
 export function relocationImageUrl(folder, name) {

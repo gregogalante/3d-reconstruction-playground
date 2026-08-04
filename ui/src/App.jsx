@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { fetchDatasets, fetchCameras, fetchRelocations } from './api';
+import { fetchDatasets, fetchCameras, fetchClouds, fetchRelocations } from './api';
 import Sidebar from './components/Sidebar';
 import Viewer3D from './components/Viewer3D';
 
@@ -7,6 +7,8 @@ function App() {
   const [datasets, setDatasets] = useState([]);
   const [selectedDataset, setSelectedDataset] = useState(null);
   const [cameras, setCameras] = useState([]);
+  const [clouds, setClouds] = useState({});
+  const [selectedCloud, setSelectedCloud] = useState(null);
   const [activeImages, setActiveImages] = useState(new Set());
   const [relocations, setRelocations] = useState([]);
   const [showRelocations, setShowRelocations] = useState(true);
@@ -19,10 +21,18 @@ function App() {
   useEffect(() => {
     if (!selectedDataset) {
       setCameras([]);
+      setClouds({});
+      setSelectedCloud(null);
       setActiveImages(new Set());
       return;
     }
     fetchCameras(selectedDataset).then(setCameras);
+    fetchClouds(selectedDataset).then(available => {
+      setClouds(available);
+      // show whatever the pipeline has already produced, densest first
+      const order = ['splat', 'dense', 'sparse'];
+      setSelectedCloud(order.find(kind => available[kind]?.available) || null);
+    });
     setActiveImages(new Set());
   }, [selectedDataset]);
 
@@ -53,6 +63,9 @@ function App() {
         datasets={datasets}
         selectedDataset={selectedDataset}
         onSelectDataset={setSelectedDataset}
+        clouds={clouds}
+        selectedCloud={selectedCloud}
+        onSelectCloud={setSelectedCloud}
         cameras={cameras}
         activeImages={activeImages}
         onToggleImage={toggleImage}
@@ -66,6 +79,7 @@ function App() {
         {selectedDataset ? (
           <Viewer3D
             dataset={selectedDataset}
+            cloud={selectedCloud}
             cameras={cameras}
             activeImages={activeImages}
             relocations={showRelocations ? filteredRelocations : []}

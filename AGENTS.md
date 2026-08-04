@@ -34,9 +34,14 @@ python server.py
 - `libs/splat_trainer.py` — runnable trainer (`python -m libs.splat_trainer`), launched
   by the pipeline's splat step. See below.
 - `libs/console.py` — the coloured `print_*` helpers shared with the subprocess.
+- `libs/ply.py` — numpy PLY vertex I/O, torch free so `server.py` can use it too.
 - `libs/read_write_model.py` — COLMAP model text/binary I/O (upstream script).
 - `relocation.py` — localise a query image against an existing reconstruction.
-- `server.py` + `ui/` — FastAPI backend and viewer.
+- `server.py` + `ui/` — FastAPI backend and viewer. `/api/datasets/<name>/clouds`
+  reports which of the sparse, dense and splat clouds exist, the UI lets you switch
+  between them and greys out the missing ones. The gaussians are served as
+  `/splat.splat` (the 32 byte per gaussian layout the web renderer reads), converted
+  on demand from the PLY and cached next to it.
 - `storage/datasets/<name>/` — `train/` (input photos), `images/` (resized),
   `database.db`, `sfm/`, `dense/`, `splat/`, `config.json`. Git-ignored.
 

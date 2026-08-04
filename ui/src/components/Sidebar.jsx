@@ -1,9 +1,11 @@
 import DatasetList from './DatasetList';
+import CloudList from './CloudList';
 import ImageList from './ImageList';
 import RelocationList from './RelocationList';
 
 export default function Sidebar({
   datasets, selectedDataset, onSelectDataset,
+  clouds, selectedCloud, onSelectCloud,
   cameras, activeImages, onToggleImage, onSelectAll, onClearAll,
   relocations, showRelocations, onToggleRelocations,
 }) {
@@ -24,6 +26,14 @@ export default function Sidebar({
 
         {selectedDataset && (
           <>
+            <Section title="Point clouds">
+              <CloudList
+                clouds={clouds}
+                selected={selectedCloud}
+                onSelect={onSelectCloud}
+              />
+            </Section>
+
             <Section title={`Images (${activeImages.size}/${cameras.length})`}>
               <ImageList
                 cameras={cameras}

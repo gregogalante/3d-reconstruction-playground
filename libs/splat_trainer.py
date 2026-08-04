@@ -15,6 +15,7 @@ import cv2
 import torch
 
 from libs import cpu_splatting
+from libs.ply import read_ply
 from libs.console import print_error, print_success, print_info, print_warning
 
 def parse_args():
@@ -46,7 +47,7 @@ def load_views(dense_path, max_size, holdout, device):
   return train, test
 
 def load_gaussians(dense_path, max_gaussians, device):
-  cloud = cpu_splatting.read_ply(os.path.join(dense_path, "fused.ply"))
+  cloud = read_ply(os.path.join(dense_path, "fused.ply"))
   points = np.stack([cloud["x"], cloud["y"], cloud["z"]], axis=1)
   colors = np.stack([cloud["red"], cloud["green"], cloud["blue"]], axis=1).astype(np.float32) / 255.0
   gaussians = cpu_splatting.init_gaussians(points, colors, device, max_gaussians=max_gaussians)

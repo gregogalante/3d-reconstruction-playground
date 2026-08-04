@@ -1,12 +1,16 @@
 import { Suspense, useMemo } from 'react';
 import { Canvas } from '@react-three/fiber';
-import { OrbitControls } from '@react-three/drei';
+import { OrbitControls, Splat } from '@react-three/drei';
 import PointCloud from './PointCloud';
 import ImagePlane from './ImagePlane';
 import RelocationMarker from './RelocationMarker';
-import { plyUrl } from '../api';
+import { cloudUrl, splatUrl } from '../api';
 
-export default function Viewer3D({ dataset, cameras, activeImages, relocations }) {
+// the dense cloud has orders of magnitude more points than the sparse one, so its
+// points must be smaller to keep surfaces readable
+const POINT_SIZE = { sparse: 0.03, dense: 0.008 };
+
+export default function Viewer3D({ dataset, cloud, cameras, activeImages, relocations }) {
   const activeCameras = useMemo(
     () => cameras.filter(c => activeImages.has(c.image_name)),
     [cameras, activeImages]
@@ -22,9 +26,19 @@ export default function Viewer3D({ dataset, cameras, activeImages, relocations }
       <axesHelper args={[2]} />
 
       <group rotation={[-Math.PI / 2, 0, 0]}>
-        <Suspense fallback={null}>
-          <PointCloud url={plyUrl(dataset)} key={dataset} />
-        </Suspense>
+        {cloud === 'splat' ? (
+          <Suspense fallback={null}>
+            <Splat src={splatUrl(dataset)} key={`${dataset}-splat`} />
+          </Suspense>
+        ) : cloud ? (
+          <Suspense fallback={null}>
+            <PointCloud
+              url={cloudUrl(dataset, cloud)}
+              size={POINT_SIZE[cloud]}
+              key={`${dataset}-${cloud}`}
+            />
+          </Suspense>
+        ) : null}
 
         {activeCameras.map(cam => (
           <Suspense key={cam.image_name} fallback={null}>

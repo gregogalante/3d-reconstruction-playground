@@ -11,6 +11,8 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
+from libs.ply import read_ply, read_header
+
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -22,6 +24,14 @@ app.add_middleware(
 STORAGE = Path(__file__).parent / "storage"
 DATASETS = STORAGE / "datasets"
 RELOCATIONS = STORAGE / "relocations"
+
+# the three point representations a dataset can hold, in pipeline order
+CLOUDS = {
+    "sparse": Path("sfm") / "reconstruction.ply",
+    "dense": Path("dense") / "fused.ply",
+    "splat": Path("splat") / "point_cloud.ply",
+}
+SH_DC = 0.28209479177387814  # value of the degree 0 spherical harmonic
 
 
 @lru_cache(maxsize=16)
@@ -85,12 +95,70 @@ def get_image(name: str, filename: str):
     return FileResponse(path, media_type="image/jpeg")
 
 
-@app.get("/api/datasets/{name}/reconstruction.ply")
-def get_ply(name: str):
-    path = DATASETS / name / "sfm" / "reconstruction.ply"
+@app.get("/api/datasets/{name}/clouds")
+def list_clouds(name: str):
+    """Which of the sparse, dense and splat clouds this dataset has on disk."""
+    clouds = {}
+    for kind, relative in CLOUDS.items():
+        path = DATASETS / name / relative
+        if not path.exists():
+            clouds[kind] = {"available": False}
+            continue
+        _, count, _ = read_header(path)
+        clouds[kind] = {
+            "available": True,
+            "points": count,
+            "bytes": path.stat().st_size,
+        }
+    return {"clouds": clouds}
+
+
+@app.get("/api/datasets/{name}/clouds/{kind}.ply")
+def get_cloud(name: str, kind: str):
+    if kind not in CLOUDS:
+        raise HTTPException(404, f"Unknown cloud {kind}")
+    path = DATASETS / name / CLOUDS[kind]
     if not path.exists():
-        raise HTTPException(404, "PLY not found")
+        raise HTTPException(404, f"{kind} cloud not found for {name}")
     return FileResponse(path, media_type="application/octet-stream")
+
+
+@app.get("/api/datasets/{name}/splat.splat")
+def get_splat(name: str):
+    """The trained gaussians in the .splat layout the web renderer reads."""
+    ply_path = DATASETS / name / CLOUDS["splat"]
+    if not ply_path.exists():
+        raise HTTPException(404, f"Splat not found for {name}")
+
+    splat_path = ply_path.with_suffix(".splat")
+    if not splat_path.exists() or splat_path.stat().st_mtime < ply_path.stat().st_mtime:
+        splat_path.write_bytes(ply_to_splat(ply_path))
+    return FileResponse(splat_path, media_type="application/octet-stream")
+
+
+def ply_to_splat(path: Path) -> bytes:
+    """Convert a 3DGS PLY to the .splat rows the viewer expects.
+
+    One 32 byte row per gaussian: position (3 float32), scale (3 float32),
+    colour RGBA (4 uint8), rotation quaternion wxyz (4 uint8, mapped to 0..255).
+    """
+    data = read_ply(path)
+
+    def column(name):
+        return np.asarray(data[name], dtype=np.float32)
+
+    rows = np.zeros(len(data), dtype=[("position", "f4", 3), ("scale", "f4", 3), ("color", "u1", 4), ("rotation", "u1", 4)])
+    rows["position"] = np.stack([column("x"), column("y"), column("z")], axis=1)
+    rows["scale"] = np.exp(np.stack([column(f"scale_{i}") for i in range(3)], axis=1))
+
+    colors = 0.5 + SH_DC * np.stack([column(f"f_dc_{i}") for i in range(3)], axis=1)
+    opacity = 1.0 / (1.0 + np.exp(-column("opacity")))
+    rows["color"] = np.clip(np.concatenate([colors, opacity[:, None]], axis=1) * 255.0, 0, 255)
+
+    quaternions = np.stack([column(f"rot_{i}") for i in range(4)], axis=1)
+    quaternions /= np.maximum(np.linalg.norm(quaternions, axis=1, keepdims=True), 1e-12)
+    rows["rotation"] = np.clip(quaternions * 128.0 + 128.0, 0, 255)
+    return rows.tobytes()
 
 
 @app.get("/api/relocations")
