@@ -15,6 +15,10 @@ from libs import cpu_mvs
 from libs.console import print_error, print_success, print_info, print_warning, print_step
 
 IMAGE_MAX_DIMENSION = 1024
+# Upper bound on the photos fed to the pipeline. Matching is quadratic in their number,
+# so a dense capture costs far more than it adds. Set to 0 to use them all.
+IMAGE_MAX_ITEMS = 300
+IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg')
 
 # COLMAP's patch match stereo needs CUDA, so the depth maps come from libs/cpu_mvs.py.
 # Those maps are noisier than the GPU ones, hence the relaxed fusion thresholds.
@@ -46,7 +50,21 @@ def parse_args():
 # BUILD IMAGES
 ##############################################################################
 
-def build_images(train_path, images_path):
+def select_images(filenames, max_items):
+  """Spread max_items picks over the sorted photos, dropping the rest.
+
+  Cutting the tail would leave a hole in the scene, so the capture is decimated
+  uniformly instead: 400 photos capped at 300 keep three and skip one, all the way
+  through. Names are sorted first, a capture is usually named in order.
+  """
+  filenames = sorted(filenames)
+  if not max_items or len(filenames) <= max_items:
+    return filenames
+  # the stride is above one, so no two picks can round to the same photo
+  return [filenames[round(i * len(filenames) / max_items)] for i in range(max_items)]
+
+
+def build_images(train_path, images_path, max_items=IMAGE_MAX_ITEMS):
   if os.path.exists(images_path) and os.listdir(images_path):
     print_info(f"Images path {images_path} already exists and is not empty. Skipping image build.")
     return
@@ -57,10 +75,13 @@ def build_images(train_path, images_path):
 
   os.makedirs(images_path, exist_ok=True)
 
+  photos = [f for f in os.listdir(train_path) if f.lower().endswith(IMAGE_EXTENSIONS)]
+  selected = select_images(photos, max_items)
+  if len(selected) < len(photos):
+    print_warning(f"Using {len(selected)} of the {len(photos)} photos in {train_path}, "
+                  f"capped by IMAGE_MAX_ITEMS")
+
   def process_image(filename):
-    if not filename.lower().endswith(('.png', '.jpg', '.jpeg')):
-      print_warning(f"Skipping non-image file: {filename}")
-      return
     source_path = os.path.join(train_path, filename)
     dest_path = os.path.join(images_path, filename)
     try:
@@ -78,7 +99,7 @@ def build_images(train_path, images_path):
       print_error(f"Failed to process image {filename}: {e}")
 
   with ThreadPoolExecutor() as executor:
-    futures = {executor.submit(process_image, f): f for f in os.listdir(train_path)}
+    futures = {executor.submit(process_image, f): f for f in selected}
     for future in as_completed(futures):
       future.result()
 
@@ -329,7 +350,7 @@ def main():
     sys.exit(1)
 
   config_path = os.path.join(dataset_path, 'config.json')
-  config = {"image_max_dimension": IMAGE_MAX_DIMENSION}
+  config = {"image_max_dimension": IMAGE_MAX_DIMENSION, "image_max_items": IMAGE_MAX_ITEMS}
   with open(config_path, 'w') as f:
     json.dump(config, f, indent=2)
   print_info(f"Config saved to {config_path}")
