@@ -39,7 +39,8 @@ python server.py
 - `libs/colmap2nerf.py` — COLMAP model to `transforms.json` (upstream instant-ngp
   script, kept as is). Run as `python -m libs.colmap2nerf`: it has no main guard, so
   importing it would execute it.
-- `relocation.py` — localise a query image against an existing reconstruction.
+- `relocation.py` — localise a query image against an existing reconstruction (see below).
+- `libs/localizer.py` — the retrieval, matching and PnP behind it.
 - `server.py` + `ui/` — FastAPI backend and viewer. `/api/datasets/<name>/clouds`
   reports which of the sparse, dense and splat clouds exist, the UI lets you switch
   between them and greys out the missing ones. The gaussians are served as
@@ -137,3 +138,56 @@ Keep these from being retried:
 
 Quality with the defaults is in [README.md](README.md). Object-scale scenes converge
 well; large outdoor scenes need more gaussians and iterations than the defaults.
+
+## Relocalisation
+
+`relocation.py` walks `libs/localizer.py` through four stages. Nothing is cached: the
+descriptor index builds from `database.db` in well under a second even on the 416
+image dataset, so there is no pipeline artifact to keep in sync.
+
+1. **Rank** the database images. The query is matched against a descriptor index built
+   from the tracks (4 descriptors per 3D point, spread over the track) and every match
+   votes for the images that observe its point. The runner up of the ratio test has to
+   belong to a *different* 3D point, otherwise a point's own sibling descriptors reject
+   every correct match. Only a ranking is needed, so 4000 query descriptors are enough.
+2. **Match** the query against the top images one by one, mutual nearest neighbours
+   plus ratio test. Database keypoints without a 3D point are dropped before matching.
+3. **Solve** PnP with LO-RANSAC at 4 px, then refine pose *and* intrinsics.
+4. **Report** inliers, mean reprojection error and a two panel `_overlay.jpg`: the
+   query on the left, the model reprojected from the estimated pose on the right, and
+   a line across the panels per inlier, from the keypoint to where its 3D point lands.
+   Both panels share the viewpoint, so the lines are parallel when the pose is right
+   and fan out when it is not; they run green to red over the RANSAC threshold. The UI
+   opens it from the relocation list.
+
+What actually mattered, measured against the table in [README.md](README.md):
+
+- **Matching per image instead of against the whole model.** The ratio test is
+  meaningless against 40k points that all look alike; it only survived at 0.5, leaving
+  a few dozen correspondences. Per image it gives 3 to 10 times more, at 0.8.
+- **Not trusting `infer_camera_from_image`.** Without a known sensor COLMAP falls back
+  to a focal of 1.2 x the largest side. On these phone photos the reconstruction says
+  0.76, so the old code localised with a 56% focal error and put the camera metres
+  away. The calibrated cameras of the reconstruction now win over any EXIF guess.
+- **Refining the focal and the distortion with the pose.** The reconstruction gives one
+  camera per image and they disagree by a few percent, which is a few percent of error
+  along the view direction. Solving for them takes the median position error on `home`
+  from 3.3% of the scene radius to 0.23%, and on `over-office-1` from 0.08% to 0.02%.
+  Refining the focal alone is not enough (`home` stops at 1.08%).
+
+### Measured dead ends
+
+- **Dense depth adds correspondences but not accuracy.** Lifting the matched keypoints
+  that were never triangulated (`--dense`, `DenseDepth` in `libs/localizer.py`) gives
+  50 to 90% more correspondences and changes the pose by less than the noise: `home`
+  0.33% of radius against 0.23% without, `over-office-1` 0.02% against 0.04%, at 1.5x
+  the matching cost. The MVS depths are simply less accurate than the triangulated
+  points. Kept as a flag, off by default.
+- **The gaussians have nothing to offer here.** Photometric refinement against a render
+  would need the torch subprocess and a differentiable pose, to improve on a PnP that
+  already lands within 0.03% of the scene radius and 0.02 degrees.
+- **kd-trees on 128 dimensional descriptors.** `scipy.cKDTree` degenerates to a full
+  scan and is 5x slower than one matrix product. Matching is brute force, one product
+  per pair, with the reverse direction taken as a second reduction over the same block
+  (that makes the mutual check nearly free). Two masked `argmin` passes beat
+  `argpartition` by 3.5x on matrices this wide.

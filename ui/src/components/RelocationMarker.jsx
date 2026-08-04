@@ -18,7 +18,7 @@ export default function RelocationMarker({ relocation }) {
 
   return (
     <group matrixAutoUpdate={false} matrix={matrix}>
-      <CameraFrustum fovx={50} fovy={38} scale={0.4} color="#ff4444" />
+      <CameraFrustum fovx={relocation.fovx ?? 50} fovy={relocation.fovy ?? 38} scale={0.4} color="#ff4444" />
     </group>
   );
 }

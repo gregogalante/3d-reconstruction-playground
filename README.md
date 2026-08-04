@@ -51,6 +51,36 @@ training views and on a 1-in-8 holdout:
 Large outdoor scenes stay blurry at these defaults: raise `--splat-max-gaussians` and
 `--splat-iterations` (cost grows sublinearly in gaussians, linearly in iterations).
 
+## Relocalisation
+
+`relocation.py` estimates where a single photo was taken from, against an existing
+reconstruction. It ranks the database images by descriptor votes, matches the query
+against the best ones, and solves PnP on the resulting 2D-3D correspondences
+(`libs/localizer.py`). Output next to the JSON: a `_overlay.jpg` with the query on one
+side and the model reprojected from the estimated pose on the other, joined by one
+line per inlier. The lines are parallel when the pose is right, and coloured green to
+red by reprojection error. It is the only way to judge a pose without ground truth,
+and the viewer opens it from the relocation list.
+
+```bash
+python relocation.py --dataset storage/datasets/home --image storage/inputs/query.jpg --output storage/relocations/home
+```
+
+Measured on queries built from dataset photos re-encoded at 75% scale, gamma 1.35 and
+JPEG 70, under a neutral name so nothing can be recognised — the reconstruction pose
+is then exact ground truth. Position error as a percentage of the scene radius:
+
+| dataset | before | now | time |
+|---|---|---|---|
+| banana (14 views) | 33.2% / 2.80° | 0.03% / 0.009° | 2.0s |
+| home (65 views) | 136.6% / 5.83° | 0.23% / 0.051° | 1.5s |
+| over-office-2 (205 views) | 35.2% / 6.38° | 0.05% / 0.023° | 1.5s |
+| south-building (128 views) | 20.1% / 4.43° | 0.01% / 0.009° | 6s |
+| over-office-1 (416 views) | 32.8% / 5.96° | 0.03% / 0.017° | 2.0s |
+
+Every query lands within 2% of the scene radius and 2°, none did before. See
+[AGENTS.md](AGENTS.md) for what changed and what did not help.
+
 ## Util links
 
 - https://github.com/ruili3/awesome-dust3r

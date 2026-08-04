@@ -189,7 +189,12 @@ def list_relocations():
                 "success": data.get("success", False),
                 "num_inliers": data.get("num_inliers", 0),
                 "num_correspondences": data.get("num_correspondences", 0),
+                "inlier_ratio": data.get("inlier_ratio"),
+                "reprojection_error": data.get("reprojection_error"),
                 "camera_center": data.get("camera_center", [0, 0, 0]),
+                "fovx": data.get("fovx", 50),
+                "fovy": data.get("fovy", 38),
+                "has_overlay": (d / f"{jf.stem}_overlay.jpg").exists(),
             }
             if data.get("rotation_matrix") and data.get("camera_center"):
                 entry["camera_to_world"] = c2w_from_relocation(
@@ -204,6 +209,15 @@ def get_relocation_image(folder: str, name: str):
     path = RELOCATIONS / folder / f"{name}.jpg"
     if not path.exists():
         raise HTTPException(404, "Relocation image not found")
+    return FileResponse(path, media_type="image/jpeg")
+
+
+@app.get("/api/relocations/{folder}/{name}/overlay")
+def get_relocation_overlay(folder: str, name: str):
+    """The verification image relocation.py draws: matches, and the model reprojected."""
+    path = RELOCATIONS / folder / f"{name}_overlay.jpg"
+    if not path.exists():
+        raise HTTPException(404, "Relocation overlay not found")
     return FileResponse(path, media_type="image/jpeg")
 
 

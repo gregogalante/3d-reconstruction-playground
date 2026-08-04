@@ -37,3 +37,7 @@ export function splatUrl(dataset) {
 export function relocationImageUrl(folder, name) {
   return `/api/relocations/${folder}/${name}/image`;
 }
+
+export function relocationOverlayUrl(folder, name) {
+  return `/api/relocations/${folder}/${name}/overlay`;
+}

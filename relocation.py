@@ -1,48 +1,19 @@
 import os
 import sys
 import json
+import math
 import shutil
 import sqlite3
 import tempfile
 import argparse
-from collections import Counter
 
 import numpy as np
-from PIL import Image
-from scipy.spatial import cKDTree
+import cv2
 import pycolmap
+from PIL import Image
 
-##############################################################################
-# PRINT HELPERS
-##############################################################################
-
-def print_error(message):
-  color = "\033[91m"
-  reset = "\033[0m"
-  print(f"{color}ERROR: {message}{reset}")
-
-def print_success(message):
-  color = "\033[92m"
-  reset = "\033[0m"
-  print(f"{color}SUCCESS: {message}{reset}")
-
-def print_info(message):
-  color = "\033[96m"
-  reset = "\033[0m"
-  print(f"{color}INFO: {message}{reset}")
-
-def print_warning(message):
-  color = "\033[93m"
-  reset = "\033[0m"
-  print(f"{color}WARNING: {message}{reset}")
-
-def print_step(message):
-  color = "\033[94m"
-  reset = "\033[0m"
-  print("\n")
-  print(f"{color}{'='*100}{reset}")
-  print(f"{color}RUNNING STEP: {message}{reset}")
-  print(f"{color}{'='*100}{reset}\n")
+from libs.console import print_error, print_success, print_info, print_warning, print_step
+from libs.localizer import localize, query_camera
 
 ##############################################################################
 # ARGS
@@ -50,313 +21,185 @@ def print_step(message):
 
 def parse_args():
   parser = argparse.ArgumentParser(description="Visual camera relocalization using COLMAP SfM")
-  parser.add_argument("--dataset", required=True, help="Path to dataset directory (e.g. datasets/home)")
+  parser.add_argument("--dataset", required=True, help="Path to dataset directory (e.g. storage/datasets/home)")
   parser.add_argument("--image", required=True, help="Path to query image")
-  parser.add_argument("--ratio", type=float, default=0.5, help="Lowe ratio test threshold (default: 0.75)")
-  parser.add_argument("--output", default=None, help="Path to output directory (saves image and JSON with relocation data)")
+  parser.add_argument("--ratio", type=float, default=0.8, help="Lowe ratio test threshold used against each retrieved image")
+  parser.add_argument("--retrieved", type=int, default=10, help="Database images matched against the query")
+  parser.add_argument("--max-error", type=float, default=4.0, help="RANSAC reprojection threshold in pixels")
+  parser.add_argument("--dense", action="store_true", help="Also match database keypoints without a 3D point, lifting them with the dense depth maps")
+  parser.add_argument("--output", default=None, help="Path to output directory (saves image, overlay and JSON with relocation data)")
   return parser.parse_args()
 
 ##############################################################################
-# LOAD RECONSTRUCTION
-##############################################################################
-
-def load_reconstruction(sfm_path):
-  recon_path = os.path.join(sfm_path, "0")
-  if not os.path.exists(recon_path):
-    print_error(f"SfM reconstruction not found at {recon_path}")
-    sys.exit(1)
-  recon = pycolmap.Reconstruction(recon_path)
-  print_info(f"Loaded reconstruction: {len(recon.cameras)} cameras, "
-             f"{len(recon.images)} images, {len(recon.points3D)} 3D points")
-  return recon
-
-##############################################################################
-# BUILD 3D DESCRIPTOR INDEX
-##############################################################################
-
-def build_3d_descriptor_index(recon, database_path):
-  """
-  Reads SIFT descriptors from the existing COLMAP SQLite database and builds
-  a descriptor index keyed by 3D point. Uses the first track element per point
-  to look up one representative descriptor.
-
-  Returns:
-    point3d_ids: np.ndarray (N,)      — 3D point IDs
-    desc_index:  np.ndarray (N, 128) float32 — descriptor per 3D point
-    xyz_array:   np.ndarray (N, 3)  float64  — world XYZ coordinates
-  """
-  conn = sqlite3.connect(database_path)
-  c = conn.cursor()
-
-  # Load all descriptors into memory keyed by image_id
-  c.execute("SELECT image_id, rows, cols, data FROM descriptors")
-  all_descriptors = {}
-  for image_id, rows, cols, data in c.fetchall():
-    all_descriptors[image_id] = np.frombuffer(data, dtype=np.uint8).reshape(rows, cols)
-  conn.close()
-
-  point3d_ids = []
-  desc_list = []
-  xyz_list = []
-
-  for pt3d_id, pt3d in recon.points3D.items():
-    elem = pt3d.track.elements[0]
-    image_id = elem.image_id
-    point2d_idx = elem.point2D_idx
-
-    if image_id not in all_descriptors:
-      continue
-
-    desc = all_descriptors[image_id][point2d_idx]  # (128,) uint8
-    point3d_ids.append(pt3d_id)
-    desc_list.append(desc)
-    xyz_list.append(pt3d.xyz)
-
-  point3d_ids = np.array(point3d_ids)
-  desc_index = np.array(desc_list, dtype=np.float32)
-  xyz_array = np.array(xyz_list, dtype=np.float64)
-
-  print_info(f"Built descriptor index with {len(point3d_ids)} 3D points")
-  return point3d_ids, desc_index, xyz_array
-
-##############################################################################
-# PREPARE QUERY IMAGE
+# QUERY IMAGE
 ##############################################################################
 
 def prepare_query_image(image_path, tmp_dir, image_max_dimension):
-  """Resize query image to image_max_dimension and save into tmp_dir."""
+  """Resize the query the way the pipeline resized the dataset, features must match."""
   with Image.open(image_path) as img:
     img = img.convert("RGB")
-    width, height = img.size
-    max_dim = max(width, height)
-    if max_dim > image_max_dimension:
-      scale = image_max_dimension / max_dim
-      new_size = (int(width * scale), int(height * scale))
-      img = img.resize(new_size, Image.Resampling.LANCZOS)
-      print_info(f"Resized query image from ({width}, {height}) to {new_size}")
-    else:
-      print_info(f"Query image size ({width}, {height}) — no resize needed")
-    out_name = os.path.basename(image_path)
-    if not out_name.lower().endswith(('.jpg', '.jpeg', '.png')):
-      out_name = out_name + '.jpg'
-    out_path = os.path.join(tmp_dir, out_name)
-    img.save(out_path)
-  return out_path
+    scale = image_max_dimension / max(img.size)
+    if scale < 1:
+      original = img.size
+      img = img.resize((int(img.width * scale), int(img.height * scale)), Image.Resampling.LANCZOS)
+      print_info(f"Resized query image from {original} to {img.size}")
+    out_path = os.path.join(tmp_dir, "query.jpg")
+    img.save(out_path, quality=95)
+    return out_path, img.size
 
-##############################################################################
-# EXTRACT QUERY FEATURES
-##############################################################################
 
-def extract_query_features(tmp_dir, tmp_db_path):
-  """
-  Extracts SIFT features from the (single) image in tmp_dir using pycolmap.
+def extract_query_features(image_path):
+  """SIFT keypoints and descriptors of a single image, through pycolmap."""
+  tmp_dir = tempfile.mkdtemp(prefix="reloc_features_")
+  try:
+    # the database has to sit outside the image folder, COLMAP scans it for images
+    images_dir = os.path.join(tmp_dir, "images")
+    os.makedirs(images_dir)
+    shutil.copy2(image_path, os.path.join(images_dir, os.path.basename(image_path)))
+    database_path = os.path.join(tmp_dir, "query.db")
+    pycolmap.extract_features(database_path, images_dir, camera_mode=pycolmap.CameraMode.SINGLE)
 
-  Returns:
-    keypoints:   np.ndarray (M, 6) float32 — [x, y, scale, ...]
-    descriptors: np.ndarray (M, 128) uint8
-  """
-  if os.path.exists(tmp_db_path):
-    os.remove(tmp_db_path)
+    connection = sqlite3.connect(database_path)
+    image_id = connection.execute("SELECT image_id FROM images LIMIT 1").fetchone()[0]
+    rows, cols, data = connection.execute("SELECT rows, cols, data FROM keypoints WHERE image_id=?", (image_id,)).fetchone()
+    keypoints = np.frombuffer(data, np.float32).reshape(rows, cols).copy()
+    rows, cols, data = connection.execute("SELECT rows, cols, data FROM descriptors WHERE image_id=?", (image_id,)).fetchone()
+    descriptors = np.frombuffer(data, np.uint8).reshape(rows, cols).copy()
+    connection.close()
+  finally:
+    shutil.rmtree(tmp_dir, ignore_errors=True)
 
-  pycolmap.extract_features(
-    tmp_db_path,
-    tmp_dir,
-    camera_mode=pycolmap.CameraMode.SINGLE,
-  )
-
-  conn = sqlite3.connect(tmp_db_path)
-  c = conn.cursor()
-
-  c.execute("SELECT image_id FROM images LIMIT 1")
-  row = c.fetchone()
-  if row is None:
-    print_error("No image found in temporary database after feature extraction.")
-    conn.close()
-    sys.exit(1)
-  image_id = row[0]
-
-  c.execute("SELECT rows, cols, data FROM keypoints WHERE image_id=?", (image_id,))
-  kp_row = c.fetchone()
-  if kp_row is None or kp_row[2] is None:
-    print_error("No keypoints extracted from query image.")
-    conn.close()
-    sys.exit(1)
-  rows, cols, data = kp_row
-  keypoints = np.frombuffer(data, dtype=np.float32).reshape(rows, cols)
-
-  c.execute("SELECT rows, cols, data FROM descriptors WHERE image_id=?", (image_id,))
-  desc_row = c.fetchone()
-  if desc_row is None or desc_row[2] is None:
-    print_error("No descriptors extracted from query image.")
-    conn.close()
-    sys.exit(1)
-  rows, cols, data = desc_row
-  descriptors = np.frombuffer(data, dtype=np.uint8).reshape(rows, cols)
-
-  conn.close()
-  print_info(f"Extracted {len(keypoints)} keypoints from query image")
+  print_info(f"Extracted {len(keypoints)} keypoints from the query image")
   return keypoints, descriptors
 
 ##############################################################################
-# MATCH DESCRIPTORS
+# OUTPUT
 ##############################################################################
 
-def match_descriptors(query_descs, index_descs, ratio=0.75):
-  """
-  Nearest-neighbor matching with Lowe's ratio test.
-
-  Returns:
-    query_idxs: (K,) int — matched query keypoint indices
-    db_idxs:    (K,) int — matched 3D point indices into index arrays
-  """
-  tree = cKDTree(index_descs)
-  dists, idxs = tree.query(query_descs.astype(np.float32), k=2, workers=-1)
-
-  ratio_mask = dists[:, 0] / (dists[:, 1] + 1e-8) < ratio
-  query_idxs = np.where(ratio_mask)[0]
-  db_idxs = idxs[ratio_mask, 0]
-
-  print_info(f"Descriptor matching: {len(query_idxs)} matches after ratio test "
-             f"(ratio={ratio}) from {len(query_descs)} query keypoints vs "
-             f"{len(index_descs)} 3D points")
-  return query_idxs, db_idxs
-
-##############################################################################
-# BUILD CAMERA FOR QUERY IMAGE
-##############################################################################
-
-def build_camera_for_query(image_path, recon):
-  """
-  Returns a pycolmap.Camera for the query image.
-  Tries EXIF focal length first; falls back to scaling the reconstruction's
-  most common camera to the query image dimensions.
-  """
-  # Strategy 0: if image already exists in reconstruction, use its exact camera
-  query_name = os.path.basename(image_path)
-  for image in recon.images.values():
-    if image.name == query_name:
-      camera = recon.cameras[image.camera_id]
-      print_info(f"Camera from existing reconstruction: {camera.model.name} "
-                 f"{camera.width}x{camera.height} f={camera.params[0]:.1f}")
-      return camera
-
-  # Strategy 1: EXIF
-  try:
-    cam = pycolmap.infer_camera_from_image(image_path)
-    if cam is not None:
-      print_info(f"Camera inferred from EXIF: {cam.model.name} "
-                 f"{cam.width}x{cam.height} f={cam.params[0]:.1f}")
-      return cam
-  except Exception:
-    pass
-
-  # Strategy 2: scale most common reconstruction camera to query dims
-  with Image.open(image_path) as img:
-    q_w, q_h = img.size
-
-  cam_sizes = Counter((c.width, c.height) for c in recon.cameras.values())
-  ref_w, ref_h = cam_sizes.most_common(1)[0][0]
-  ref_cam = next(c for c in recon.cameras.values() if c.width == ref_w and c.height == ref_h)
-
-  scale = max(q_w, q_h) / max(ref_w, ref_h)
-  focal = ref_cam.params[0] * scale
-
-  cam = pycolmap.Camera(
-    model="SIMPLE_RADIAL",
-    width=q_w,
-    height=q_h,
-    params=[focal, q_w / 2.0, q_h / 2.0, 0.0],
-  )
-  print_info(f"Camera from reconstruction (scaled): SIMPLE_RADIAL "
-             f"{cam.width}x{cam.height} f={focal:.1f}")
-  return cam
-
-##############################################################################
-# RUN PNP
-##############################################################################
-
-def run_pnp(points2D, points3D, camera):
-  """
-  Runs PnP RANSAC via pycolmap.
-
-  Returns result dict with 'cam_from_world', 'num_inliers', 'inlier_mask',
-  or None if estimation failed.
-  """
-  if len(points2D) < 4:
-    print_error(f"Too few 2D-3D correspondences: {len(points2D)} (need at least 4)")
-    return None
-
-  result = pycolmap.estimate_and_refine_absolute_pose(
-    points2D.astype(np.float64),
-    points3D.astype(np.float64),
-    camera,
-  )
-  return result
-
-##############################################################################
-# PRINT POSE RESULT
-##############################################################################
-
-def print_pose_result(result):
-  if result is None:
-    print_error("Pose estimation failed — no result returned.")
-    return
-
-  cam_from_world = result["cam_from_world"]
-  R = cam_from_world.rotation.matrix()  # 3×3, world→cam
-  t = cam_from_world.translation        # (3,)
-
-  # Camera center in world coordinates
-  camera_center = -R.T @ t
-
-  num_inliers = result.get("num_inliers", "?")
-  inlier_mask = result.get("inlier_mask", [])
-
-  print_success("Pose estimated successfully!")
-  print_info(f"  Inliers: {num_inliers} / {len(inlier_mask)}")
-  print_info(f"  Camera position in world:    [{camera_center[0]:.4f}, {camera_center[1]:.4f}, {camera_center[2]:.4f}]")
-  print_info(f"  Translation vector t:        [{t[0]:.4f}, {t[1]:.4f}, {t[2]:.4f}]")
-  print_info(f"  Rotation matrix (world→cam):")
-  for row in R:
-    print_info(f"    [{row[0]:+.6f}  {row[1]:+.6f}  {row[2]:+.6f}]")
-
-
-def build_relocation_data(result, image_path, dataset_path, ratio):
-  """Build a JSON-serializable dict with relocation results."""
+def build_relocation_data(result, image_path, dataset_path, camera, camera_source):
+  """JSON serialisable summary of the estimate, including how much to trust it."""
   data = {
     "query_image": os.path.abspath(image_path),
     "dataset": os.path.abspath(dataset_path),
-    "ratio": ratio,
-    "success": result is not None,
+    "success": bool(result.get("success")),
+    "num_correspondences": result.get("num_correspondences", 0),
+    "retrieved_images": result.get("retrieved", []),
+    "camera_source": camera_source,
+    "camera_params": [float(p) for p in camera.params],
+    "fovx": 2 * math.degrees(math.atan(camera.width / (2 * camera.params[0]))),
+    "fovy": 2 * math.degrees(math.atan(camera.height / (2 * camera.params[0]))),
   }
-  if result is not None:
-    cam_from_world = result["cam_from_world"]
-    R = cam_from_world.rotation.matrix()
-    t = cam_from_world.translation
-    camera_center = (-R.T @ t).tolist()
-    inlier_mask = result.get("inlier_mask", [])
-    data.update({
-      "num_inliers": result.get("num_inliers"),
-      "num_correspondences": len(inlier_mask),
-      "camera_center": camera_center,
-      "translation": t.tolist(),
-      "rotation_matrix": [row.tolist() for row in R],
-    })
+  if not result.get("success"):
+    return data
+
+  cam_from_world = result["cam_from_world"]
+  rotation = cam_from_world.rotation.matrix()
+  translation = cam_from_world.translation
+  data.update({
+    "num_inliers": result["num_inliers"],
+    "num_sparse_correspondences": result["num_sparse_correspondences"],
+    "num_dense_correspondences": result["num_dense_correspondences"],
+    "inlier_ratio": round(result["inlier_ratio"], 3),
+    "reprojection_error": round(result["reprojection_error"], 3),
+    "camera_center": (-rotation.T @ translation).tolist(),
+    "translation": translation.tolist(),
+    "rotation_matrix": [row.tolist() for row in rotation],
+  })
   return data
 
 
-def save_output(output_dir, image_path, relocation_data):
+def project_cloud(dataset_path, result, camera, frame):
+  """Paint the reconstruction, seen from the estimated pose, over a darkened frame."""
+  cloud_path = os.path.join(dataset_path, "dense", "fused.ply")
+  if not os.path.exists(cloud_path):
+    cloud_path = os.path.join(dataset_path, "sfm", "reconstruction.ply")
+  if not os.path.exists(cloud_path):
+    return None
+
+  from libs.ply import read_ply
+  cloud = read_ply(cloud_path)
+  xyz = np.stack([np.asarray(cloud[axis]) for axis in ("x", "y", "z")], axis=1).astype(np.float64)
+  rgb = np.stack([np.asarray(cloud[channel]) for channel in ("blue", "green", "red")], axis=1)
+
+  local = result["cam_from_world"] * xyz
+  front = local[:, 2] > 0
+  pixels = np.asarray(camera.img_from_cam(local[front]))
+  rgb, depth = rgb[front], local[front, 2]
+
+  height, width = frame.shape[:2]
+  columns = np.round(pixels[:, 0]).astype(int)
+  lines = np.round(pixels[:, 1]).astype(int)
+  inside = (columns >= 0) & (columns < width) & (lines >= 0) & (lines < height)
+
+  panel = (frame * 0.25).astype(np.uint8)
+  order = np.argsort(-depth[inside])  # back to front, the closest points stay visible
+  panel[lines[inside][order], columns[inside][order]] = rgb[inside][order]
+  return panel, int(inside.sum())
+
+
+def residual_color(residual, max_error):
+  """Green for a residual near zero, red at the RANSAC threshold."""
+  fraction = min(residual / max_error, 1.0)
+  return (0, int(255 * (1 - fraction)), int(255 * fraction))
+
+
+def build_overlay(dataset_path, query_path, result, camera, max_error, output_path, drawn_matches=40):
+  """Save a two panel check of the estimate: the inlier matches and the projected model.
+
+  Without ground truth this is the only honest way to judge a relocalisation. Left the
+  query with its inlier keypoints, right the reconstruction seen from the estimated
+  pose, and a line across the two panels per inlier, from the keypoint to where its
+  3D point reprojects. Both panels share the same viewpoint, so the lines come out
+  parallel when the pose is right and fan out when it is not. They are coloured from
+  green to red over the RANSAC threshold.
+  """
+  frame = cv2.imread(query_path)
+  inliers = result["inlier_mask"]
+  points2D = result["points2D"][inliers]
+  projected = np.asarray(camera.img_from_cam(result["cam_from_world"] * result["points3D"][inliers]))
+  residuals = np.linalg.norm(projected - points2D, axis=1)
+
+  matches = frame.copy()
+  for (x, y), residual in zip(points2D, residuals):
+    cv2.circle(matches, (int(x), int(y)), 3, residual_color(residual, max_error), -1, cv2.LINE_AA)
+
+  panels = [matches]
+  cloud = project_cloud(dataset_path, result, camera, frame)
+  if cloud is None:
+    print_warning("No point cloud to draw the projection with")
+  else:
+    panel, drawn = cloud
+    cv2.putText(panel, f"model reprojected, {drawn} points",
+                (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+    panels.append(panel)
+
+  overlay = np.hstack(panels)
+  if len(panels) > 1:
+    # a line per inlier would be a wall of ink, an even sample reads the same
+    step = max(len(points2D) // drawn_matches, 1)
+    for (x, y), (px, py), residual in zip(points2D[::step], projected[::step], residuals[::step]):
+      color = residual_color(residual, max_error)
+      cv2.line(overlay, (int(x), int(y)), (frame.shape[1] + int(px), int(py)), color, 1, cv2.LINE_AA)
+      cv2.circle(overlay, (frame.shape[1] + int(px), int(py)), 3, color, -1, cv2.LINE_AA)
+
+  cv2.putText(overlay, f"{int(inliers.sum())} inliers, {result['reprojection_error']:.2f} px mean",
+              (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
+  cv2.imwrite(output_path, overlay)
+  print_info(f"Saved the verification overlay to {output_path}")
+
+
+def save_output(output_dir, image_path, query_path, relocation_data, dataset_path, result, camera, max_error):
   os.makedirs(output_dir, exist_ok=True)
-  # Copy query image
-  dst_image = os.path.join(output_dir, os.path.basename(image_path))
-  shutil.copy2(image_path, dst_image)
-  print_info(f"Saved image to {dst_image}")
-  # Save JSON
-  json_name = os.path.splitext(os.path.basename(image_path))[0] + ".json"
-  dst_json = os.path.join(output_dir, json_name)
-  with open(dst_json, "w") as f:
-    json.dump(relocation_data, f, indent=2)
-  print_info(f"Saved relocation data to {dst_json}")
+  name = os.path.splitext(os.path.basename(image_path))[0]
+
+  shutil.copy2(image_path, os.path.join(output_dir, os.path.basename(image_path)))
+  with open(os.path.join(output_dir, f"{name}.json"), "w") as handle:
+    json.dump(relocation_data, handle, indent=2)
+  print_info(f"Saved relocation data to {os.path.join(output_dir, f'{name}.json')}")
+
+  if result.get("success"):
+    build_overlay(dataset_path, query_path, result, camera, max_error,
+                  os.path.join(output_dir, f"{name}_overlay.jpg"))
 
 ##############################################################################
 # MAIN
@@ -364,13 +207,10 @@ def save_output(output_dir, image_path, relocation_data):
 
 def main():
   args = parse_args()
-
   dataset_path = args.dataset
-  sfm_path = os.path.join(dataset_path, "sfm")
   database_path = os.path.join(dataset_path, "database.db")
-  image_path = args.image
 
-  for path, label in [(dataset_path, "dataset"), (database_path, "database"), (image_path, "query image")]:
+  for path, label in [(dataset_path, "dataset"), (database_path, "database"), (args.image, "query image")]:
     if not os.path.exists(path):
       print_error(f"{label} not found: {path}")
       sys.exit(1)
@@ -379,50 +219,56 @@ def main():
   if not os.path.exists(config_path):
     print_error(f"config.json not found in {dataset_path}. Run pipeline.py first.")
     sys.exit(1)
-  with open(config_path) as f:
-    config = json.load(f)
-  image_max_dimension = config["image_max_dimension"]
-  print_info(f"Loaded config: image_max_dimension={image_max_dimension}")
+  with open(config_path) as handle:
+    image_max_dimension = json.load(handle)["image_max_dimension"]
 
-  print_step("Load SfM Reconstruction")
-  recon = load_reconstruction(sfm_path)
-
-  print_step("Build 3D Descriptor Index")
-  _, desc_index, xyz_array = build_3d_descriptor_index(recon, database_path)
+  reconstruction = pycolmap.Reconstruction(os.path.join(dataset_path, "sfm", "0"))
+  print_info(f"Loaded reconstruction: {len(reconstruction.images)} images, {len(reconstruction.points3D)} 3D points")
 
   tmp_dir = tempfile.mkdtemp(prefix="reloc_")
   try:
     print_step("Prepare Query Image")
-    resized_path = prepare_query_image(image_path, tmp_dir, image_max_dimension)
-    tmp_db_path = os.path.join(tmp_dir, "query.db")
+    query_path, size = prepare_query_image(args.image, tmp_dir, image_max_dimension)
 
     print_step("Extract Query Features")
-    query_kp, query_desc = extract_query_features(tmp_dir, tmp_db_path)
-
-    print_step("Match Descriptors")
-    q_idxs, db_idxs = match_descriptors(query_desc.astype(np.float32), desc_index, ratio=args.ratio)
-
-    if len(q_idxs) < 4:
-      print_error(f"Insufficient matches after ratio test: {len(q_idxs)}. "
-                  "Try lowering --ratio or using a query image from the same scene.")
-      sys.exit(1)
-
-    points2D = query_kp[q_idxs, 0:2].astype(np.float64)   # (K, 2) x,y
-    points3D = xyz_array[db_idxs].astype(np.float64)       # (K, 3)
+    keypoints, descriptors = extract_query_features(query_path)
 
     print_step("Build Query Camera Model")
-    camera = build_camera_for_query(resized_path, recon)
+    exif_camera = None
+    try:
+      exif_camera = pycolmap.infer_camera_from_image(query_path)
+    except Exception:
+      pass
+    camera, camera_source = query_camera(reconstruction, size, os.path.basename(args.image), exif_camera)
+    print_info(f"Camera from {camera_source}: {camera.model.name} {camera.width}x{camera.height} "
+               f"f={camera.params[0]:.1f}")
 
-    print_step("Run PnP Pose Estimation")
-    result = run_pnp(points2D, points3D, camera)
+    print_step("Localize")
+    result = localize(dataset_path, keypoints, descriptors, camera,
+                      num_retrieved=args.retrieved, ratio=args.ratio,
+                      max_error=args.max_error, use_dense=args.dense,
+                      log=print_info)
 
     print_step("Results")
-    print_pose_result(result)
+    if not result["success"]:
+      print_error(f"Pose estimation failed with {result['num_correspondences']} correspondences")
+    else:
+      center = -result["cam_from_world"].rotation.matrix().T @ result["cam_from_world"].translation
+      print_success("Pose estimated")
+      print_info(f"  Inliers: {result['num_inliers']}/{result['num_correspondences']} "
+                 f"({100 * result['inlier_ratio']:.0f}%), mean reprojection error "
+                 f"{result['reprojection_error']:.2f} px")
+      print_info(f"  Camera center: [{center[0]:.4f}, {center[1]:.4f}, {center[2]:.4f}]")
+      # the inlier ratio is not a quality signal here, correspondences are collected
+      # generously on purpose, but a thin or badly fitting inlier set is
+      if result["num_inliers"] < 30 or result["reprojection_error"] > 2.0:
+        print_warning("Weak support: check the overlay before trusting this pose")
 
     if args.output:
-      relocation_data = build_relocation_data(result, image_path, dataset_path, args.ratio)
-      save_output(args.output, image_path, relocation_data)
+      data = build_relocation_data(result, args.image, dataset_path, camera, camera_source)
+      save_output(args.output, args.image, query_path, data, dataset_path, result, camera, args.max_error)
 
+    sys.exit(0 if result["success"] else 1)
   finally:
     shutil.rmtree(tmp_dir, ignore_errors=True)
 
