@@ -141,6 +141,15 @@ def ply_to_splat(path: Path) -> bytes:
 
     One 32 byte row per gaussian: position (3 float32), scale (3 float32),
     colour RGBA (4 uint8), rotation quaternion wxyz (4 uint8, mapped to 0..255).
+
+    The renderer displays the rows turned by half a turn around x, a convention
+    inherited from the antimatter15 viewer: it negates z when reading a center, then
+    negates y again when uploading it, and decodes the quaternion to match. Nobody
+    notices while looking at gaussians alone, but here they share the scene with the
+    point clouds and the camera frustums, which come straight from the COLMAP frame.
+
+    So the rows are written pre turned by the same half turn, which cancels out:
+    position `(x, y, z)` -> `(x, -y, -z)`, rotation `(w, x, y, z)` -> `(w, x, -y, -z)`.
     """
     data = read_ply(path)
 
@@ -148,14 +157,14 @@ def ply_to_splat(path: Path) -> bytes:
         return np.asarray(data[name], dtype=np.float32)
 
     rows = np.zeros(len(data), dtype=[("position", "f4", 3), ("scale", "f4", 3), ("color", "u1", 4), ("rotation", "u1", 4)])
-    rows["position"] = np.stack([column("x"), column("y"), column("z")], axis=1)
+    rows["position"] = np.stack([column("x"), -column("y"), -column("z")], axis=1)
     rows["scale"] = np.exp(np.stack([column(f"scale_{i}") for i in range(3)], axis=1))
 
     colors = 0.5 + SH_DC * np.stack([column(f"f_dc_{i}") for i in range(3)], axis=1)
     opacity = 1.0 / (1.0 + np.exp(-column("opacity")))
     rows["color"] = np.clip(np.concatenate([colors, opacity[:, None]], axis=1) * 255.0, 0, 255)
 
-    quaternions = np.stack([column(f"rot_{i}") for i in range(4)], axis=1)
+    quaternions = np.stack([column("rot_0"), column("rot_1"), -column("rot_2"), -column("rot_3")], axis=1)
     quaternions /= np.maximum(np.linalg.norm(quaternions, axis=1, keepdims=True), 1e-12)
     rows["rotation"] = np.clip(quaternions * 128.0 + 128.0, 0, 255)
     return rows.tobytes()

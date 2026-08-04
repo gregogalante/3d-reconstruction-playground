@@ -44,7 +44,13 @@ python server.py
   reports which of the sparse, dense and splat clouds exist, the UI lets you switch
   between them and greys out the missing ones. The gaussians are served as
   `/splat.splat` (the 32 byte per gaussian layout the web renderer reads), converted
-  on demand from the PLY and cached next to it.
+  on demand from the PLY and cached next to it. The conversion pre turns every
+  gaussian by half a turn around x, because drei's `Splat` displays the rows turned
+  that way (it negates the center z on read, the center y on upload, and decodes the
+  quaternion to match). Without it the gaussians sit rotated against the point clouds
+  and the camera frustums, which are drawn straight from the COLMAP frame. Delete the
+  cached `.splat` files after touching the conversion, the cache only tracks the PLY
+  timestamp.
 - `storage/datasets/<name>/` — `train/` (input photos), `images/` (resized),
   `database.db`, `sfm/`, `dense/`, `splat/`, `config.json`. Git-ignored.
 
