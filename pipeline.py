@@ -4,14 +4,15 @@ import json
 import time
 import shutil
 import argparse
+import subprocess
 import pycolmap
 import numpy as np
 from PIL import Image
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from scipy.spatial import cKDTree
 
 from libs.read_write_model import read_cameras_binary, write_cameras_text, read_images_binary, write_images_text, read_points3D_binary, write_points3D_text
 from libs import cpu_mvs
+from libs.console import print_error, print_success, print_info, print_warning, print_step
 
 IMAGE_MAX_DIMENSION = 1024
 
@@ -21,49 +22,23 @@ DENSE_MIN_NUM_PIXELS = 3
 DENSE_MAX_NORMAL_ERROR = 25.0
 
 ##############################################################################
-# PRINT HELPERS
-##############################################################################
-
-def print_error(message):
-  color = "\033[91m"  # Red color
-  reset = "\033[0m"
-  print(f"{color}ERROR: {message}{reset}")
-
-def print_success(message):
-  color = "\033[92m"  # Green color
-  reset = "\033[0m"
-  print(f"{color}SUCCESS: {message}{reset}")
-
-def print_info(message):
-  color = "\033[96m"  # Cyan color
-  reset = "\033[0m"
-  print(f"{color}INFO: {message}{reset}")
-
-def print_warning(message):
-  color = "\033[93m"  # Yellow color
-  reset = "\033[0m"
-  print(f"{color}WARNING: {message}{reset}")
-
-def print_step(message):
-  color = "\033[94m"  # Blue color
-  reset = "\033[0m"
-  print("\n")
-  print(f"{color}{'='*100}{reset}")
-  print(f"{color}RUNNING STEP: {message}{reset}")
-  print(f"{color}{'='*100}{reset}\n")
-
-##############################################################################
 # ARGS
 ##############################################################################
 
 def parse_args():
   parser = argparse.ArgumentParser(description="COLMAP SfM pipeline")
   parser.add_argument("--dataset", required=True, help="Path to dataset directory (e.g. storage/datasets/home)")
-  parser.add_argument("--reset", action="store_true", help="Reset the dataset by deleting existing images, database, SFM and dense reconstruction")
+  parser.add_argument("--reset", action="store_true", help="Reset the dataset by deleting existing images, database, SFM, dense and splat reconstruction")
   parser.add_argument("--dense-max-size", type=int, default=640, help="Max image dimension used to match depth maps: higher is denser and slower")
   parser.add_argument("--dense-num-src", type=int, default=6, help="Number of source views matched against each image")
   parser.add_argument("--dense-num-samples", type=int, default=128, help="Number of depth planes swept per image")
   parser.add_argument("--dense-num-workers", type=int, default=None, help="Images matched in parallel (defaults to CPU count - 2)")
+  parser.add_argument("--splat-iterations", type=int, default=2000, help="Gaussian splatting optimization steps")
+  parser.add_argument("--splat-max-size", type=int, default=400, help="Max image dimension used to train the splat: higher is sharper and slower")
+  parser.add_argument("--splat-max-gaussians", type=int, default=60000, help="Upper bound on the gaussians sampled from the dense point cloud")
+  parser.add_argument("--splat-capacity", type=int, default=64, help="Gaussians composited per tile, front to back")
+  parser.add_argument("--splat-holdout", type=int, default=8, help="Keep every Nth view out of the splat training to measure novel view quality (0 disables)")
+  parser.add_argument("--splat-device", default="cpu", choices=["cpu", "mps"], help="Torch device used to train the splat")
   return parser.parse_args()
 
 ##############################################################################
@@ -299,6 +274,39 @@ def build_dense_point_cloud(dense_path):
   print_success(f"Dense point cloud with {len(reconstruction.points3D)} points exported to {dense_ply_path}.")
 
 ##############################################################################
+# BUILD SPLAT
+##############################################################################
+
+def build_splat(dataset_path, args):
+  dense_ply_path = os.path.join(dataset_path, "dense", "fused.ply")
+  if not os.path.exists(dense_ply_path):
+    print_error(f"Dense point cloud {dense_ply_path} does not exist. Cannot train the splat.")
+    return
+
+  splat_ply_path = os.path.join(dataset_path, "splat", "point_cloud.ply")
+  if os.path.exists(splat_ply_path):
+    print_info(f"Splat {splat_ply_path} already exists. Skipping training.")
+    return
+
+  # the trainer runs in its own process: torch and pycolmap each link their own
+  # libomp and abort as soon as they share one
+  print_info("Training the gaussian splat with libs/splat_trainer.py...")
+  command = [
+    sys.executable, "-m", "libs.splat_trainer",
+    "--dataset", os.path.abspath(dataset_path),
+    "--iterations", str(args.splat_iterations),
+    "--max-size", str(args.splat_max_size),
+    "--max-gaussians", str(args.splat_max_gaussians),
+    "--capacity", str(args.splat_capacity),
+    "--holdout", str(args.splat_holdout),
+    "--device", args.splat_device,
+  ]
+  if subprocess.run(command, cwd=os.path.dirname(os.path.abspath(__file__))).returncode != 0:
+    print_error("Gaussian splatting training failed.")
+    return
+  print_success(f"Splat exported to {splat_ply_path}.")
+
+##############################################################################
 # MAIN
 ##############################################################################
 
@@ -311,6 +319,7 @@ def main():
   database_path = os.path.join(dataset_path, 'database.db')
   sfm_path = os.path.join(dataset_path, 'sfm')
   dense_path = os.path.join(dataset_path, 'dense')
+  splat_path = os.path.join(dataset_path, 'splat')
 
   if not os.path.exists(dataset_path):
     print_error(f"Dataset path {dataset_path} does not exist.")
@@ -331,6 +340,8 @@ def main():
       shutil.rmtree(sfm_path)
     if os.path.exists(dense_path):
       shutil.rmtree(dense_path)
+    if os.path.exists(splat_path):
+      shutil.rmtree(splat_path)
 
   time_start = time.time()
   print_step("🚀 Build Images")
@@ -347,13 +358,14 @@ def main():
   build_sfm_reconstruction_txt(sfm_path)
   print_step("🚀 Build SFM Reconstruction transforms.json")
   build_sfm_reconstruction_transforms_json(images_path, sfm_path)
-
   print_step("🚀 Build Dense Workspace")
-  if build_dense_workspace(sfm_path, images_path, dense_path):
-    print_step("🚀 Build Dense Depth Maps")
-    build_dense_depth_maps(dense_path, args.dense_max_size, args.dense_num_src, args.dense_num_samples, args.dense_num_workers)
-    print_step("🚀 Build Dense Point Cloud")
-    build_dense_point_cloud(dense_path)
+  build_dense_workspace(sfm_path, images_path, dense_path)
+  print_step("🚀 Build Dense Depth Maps")
+  build_dense_depth_maps(dense_path, args.dense_max_size, args.dense_num_src, args.dense_num_samples, args.dense_num_workers)
+  print_step("🚀 Build Dense Point Cloud")
+  build_dense_point_cloud(dense_path)
+  print_step("🚀 Build Gaussian Splat")
+  build_splat(dataset_path, args)
 
   print_step("✅ Pipeline completed")
   time_end = time.time()
