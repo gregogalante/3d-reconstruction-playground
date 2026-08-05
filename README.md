@@ -13,6 +13,16 @@ much more than it adds; over the cap the photos are decimated uniformly (400 cap
 300 keeps three and skips one) instead of cutting the tail, which would leave a hole in
 the scene. Set it to 0 to use them all.
 
+`train/` can hold a `.mov`, `.mp4` or `.m4v` instead of photos. The clip is cut into as
+many even windows as the cap allows and each one gives up its sharpest frame, so the
+scene is covered evenly and the frames motion blur ruined are skipped. Everything after
+that is the same pipeline.
+
+```bash
+mkdir -p storage/datasets/kitchen/train && cp ~/Movies/kitchen.mov storage/datasets/kitchen/train/
+python pipeline.py --dataset storage/datasets/kitchen
+```
+
 ## Dense reconstruction
 
 The pipeline ends with a dense reconstruction that runs entirely on CPU (COLMAP's

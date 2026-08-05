@@ -33,7 +33,8 @@ python server.py
   reach `images/`. Over the cap the capture is decimated uniformly rather than cut
   short (400 photos capped at 300 keep three and skip one), so the scene stays
   covered; 0 disables it. Both land in `config.json`, and changing either needs
-  `--reset` since `build_images` skips a non empty `images/`.
+  `--reset` since `build_images` skips a non empty `images/`. A `train/` holding no
+  photos but a `.mov`/`.mp4`/`.m4v` is split into frames instead, see below.
 - `libs/cpu_mvs.py` — CPU multi-view stereo (see below).
 - `libs/cpu_splatting.py` — CPU gaussian splatting: rasteriser, training, PLY export.
 - `libs/splat_trainer.py` — runnable trainer (`python -m libs.splat_trainer`), launched
@@ -59,6 +60,25 @@ python server.py
   timestamp.
 - `storage/datasets/<name>/` — `train/` (input photos), `images/` (resized),
   `database.db`, `sfm/`, `dense/`, `splat/`, `config.json`. Git-ignored.
+
+## Video input
+
+`build_images` falls back to `build_frames` when `train/` has a clip and no photos.
+The clip is cut into `IMAGE_MAX_ITEMS` even windows and each contributes its sharpest
+frame, scored by the variance of the Laplacian: a handheld pan is mostly redundant and
+partly smeared by motion blur, which SIFT cannot match. One decoding pass through
+OpenCV, holding one frame at a time. Frames land as `frame_00000.jpg` and the rest of
+the pipeline cannot tell the difference, except that they carry no EXIF, so every
+camera starts from COLMAP's default focal prior.
+
+Measured on a clip built from `over-office-2`'s 205 photos. Whole clip through the
+pipeline: 205 frames extracted, 205 registered in a single SfM model, 2.8M dense
+points at 82 to 90% depth coverage per frame, splat trained. Capped at 60 frames it
+splits into 3 models of 33/10/7 images, but so does running on 60 of the original
+photos (33/13/3): that is the decimation talking, not the video, and it is why
+`build_sfm_reconstruction` now warns when the photos do not connect into one model.
+Blurring two frames out of three in the clip changed nothing, the selection found a
+sharp frame in all 60 windows (scores 481 and up, against 50 to 70 for the blurred).
 
 ## Dense reconstruction on CPU
 

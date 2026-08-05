@@ -5,6 +5,7 @@ import time
 import shutil
 import argparse
 import subprocess
+import cv2
 import pycolmap
 import numpy as np
 from PIL import Image
@@ -19,6 +20,8 @@ IMAGE_MAX_DIMENSION = 1024
 # so a dense capture costs far more than it adds. Set to 0 to use them all.
 IMAGE_MAX_ITEMS = 300
 IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg')
+# A `train/` folder holding a clip instead of photos is turned into frames, same cap.
+VIDEO_EXTENSIONS = ('.mov', '.mp4', '.m4v')
 
 # COLMAP's patch match stereo needs CUDA, so the depth maps come from libs/cpu_mvs.py.
 # Those maps are noisier than the GPU ones, hence the relaxed fusion thresholds.
@@ -64,6 +67,70 @@ def select_images(filenames, max_items):
   return [filenames[round(i * len(filenames) / max_items)] for i in range(max_items)]
 
 
+def _sharpness(frame):
+  """Variance of the Laplacian, the usual cheap stand in for how blurred a frame is."""
+  small = cv2.resize(frame, (320, round(320 * frame.shape[0] / frame.shape[1])))
+  return cv2.Laplacian(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY), cv2.CV_32F).var()
+
+
+def count_frames(video_path):
+  """Frames in a clip, counted by hand when the container does not say."""
+  capture = cv2.VideoCapture(video_path)
+  total = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+  if total <= 0:
+    # grab() demuxes without decoding, so counting costs a fraction of a read pass
+    total = 0
+    while capture.grab():
+      total += 1
+  capture.release()
+  return total
+
+
+def build_frames(video_path, images_path, max_items, max_dimension=IMAGE_MAX_DIMENSION):
+  """Write the sharpest frame of each of max_items evenly spaced windows.
+
+  A handheld clip is mostly redundant and partly smeared by motion blur, which SIFT
+  cannot match. Splitting it into as many windows as frames wanted and keeping the
+  sharpest frame of each covers the scene evenly and skips the unusable ones, in a
+  single decoding pass.
+  """
+  total = count_frames(video_path)
+  if total <= 0:
+    print_error(f"No frames could be read from {video_path}")
+    return
+  windows = min(max_items, total) if max_items else total
+  print_info(f"Reading {total} frames from {os.path.basename(video_path)}, keeping the "
+             f"sharpest of {windows} windows")
+
+  def write(index, frame):
+    height, width = frame.shape[:2]
+    if max(width, height) > max_dimension:
+      scale = max_dimension / max(width, height)
+      frame = cv2.resize(frame, (int(width * scale), int(height * scale)), interpolation=cv2.INTER_AREA)
+    cv2.imwrite(os.path.join(images_path, f"frame_{index:05d}.jpg"), frame,
+                [cv2.IMWRITE_JPEG_QUALITY, 95])
+
+  capture = cv2.VideoCapture(video_path)
+  window, best_score, best_frame = 0, -1.0, None
+  index = 0
+  while True:
+    read, frame = capture.read()
+    if not read:
+      break
+    current = min(int(index * windows / total), windows - 1)
+    if current != window:
+      write(window, best_frame)
+      window, best_score, best_frame = current, -1.0, None
+    score = _sharpness(frame)
+    if score > best_score:
+      best_score, best_frame = score, frame
+    index += 1
+  capture.release()
+  if best_frame is not None:
+    write(window, best_frame)
+  print_success(f"Wrote {len(os.listdir(images_path))} frames to {images_path}")
+
+
 def build_images(train_path, images_path, max_items=IMAGE_MAX_ITEMS):
   if os.path.exists(images_path) and os.listdir(images_path):
     print_info(f"Images path {images_path} already exists and is not empty. Skipping image build.")
@@ -76,6 +143,15 @@ def build_images(train_path, images_path, max_items=IMAGE_MAX_ITEMS):
   os.makedirs(images_path, exist_ok=True)
 
   photos = [f for f in os.listdir(train_path) if f.lower().endswith(IMAGE_EXTENSIONS)]
+  if not photos:
+    videos = sorted(f for f in os.listdir(train_path) if f.lower().endswith(VIDEO_EXTENSIONS))
+    if not videos:
+      print_error(f"No photos and no video in {train_path}. Cannot build images.")
+      return
+    if len(videos) > 1:
+      print_warning(f"Using {videos[0]} only, ignoring {', '.join(videos[1:])}")
+    return build_frames(os.path.join(train_path, videos[0]), images_path, max_items)
+
   selected = select_images(photos, max_items)
   if len(selected) < len(photos):
     print_warning(f"Using {len(selected)} of the {len(photos)} photos in {train_path}, "
@@ -148,8 +224,14 @@ def build_sfm_reconstruction(database_path, images_path, sfm_path):
 
   print_info("Running incremental mapping to build SFM reconstruction using pycolmap...")
   reconstructions = pycolmap.incremental_mapping(database_path, images_path, sfm_path)
-  reconstruction = reconstructions[0]
-  print(reconstruction.summary())
+  if len(reconstructions) > 1:
+    # everything downstream reads sfm/0 only, so say it out loud instead of quietly
+    # reconstructing a third of the scene
+    sizes = {index: len(model.images) for index, model in reconstructions.items()}
+    print_warning(f"The photos split into {len(sizes)} disconnected models with "
+                  f"{sizes} images: the rest of the pipeline only uses sfm/0. "
+                  f"Shoot views that overlap the gaps, or raise IMAGE_MAX_ITEMS.")
+  print(reconstructions[0].summary())
   print_success("SFM reconstruction completed.")
 
 ##############################################################################
