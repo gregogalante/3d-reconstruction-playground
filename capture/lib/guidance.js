@@ -101,6 +101,7 @@ function orbitAdvice (state) {
 
   const advice = {
     capture: false,
+    cue: 'walk',
     progress: covered.filter(Boolean).length / plan.targets.length,
     target,
     arrow: relative ? { angle: Math.atan2(relative.lateral, relative.ahead) * 180 / Math.PI, behind: relative.ahead < 0 } : null,
@@ -108,19 +109,25 @@ function orbitAdvice (state) {
     warning: null
   }
 
+  advice.distance = radius
+
   if (offAxis > ORBIT.offAxisLimit) {
+    advice.cue = 'aim'
     advice.text = 'Point back at the subject'
     return advice
   }
   if (radius < plan.radius * ORBIT.minRadiusRatio) {
+    advice.cue = 'close'
     advice.text = 'Too close — step back'
     return advice
   }
   if (radius > plan.radius * ORBIT.maxRadiusRatio) {
+    advice.cue = 'far'
     advice.text = 'Too far — close in'
     return advice
   }
   if (!target) {
+    advice.cue = 'complete'
     advice.text = 'Every angle covered. Finish, or keep filling in.'
     advice.capture = separation >= ORBIT.angularStep && seconds >= ORBIT.minSeconds
     return advice
@@ -128,16 +135,19 @@ function orbitAdvice (state) {
 
   if (separation >= ORBIT.angularStep && seconds >= ORBIT.minSeconds) {
     advice.capture = true
+    advice.cue = 'walk'
     advice.text = 'Keep walking around it'
     return advice
   }
 
   const sideways = Math.abs(relative.lateral) > Math.abs(relative.vertical)
   if (sideways) {
+    advice.cue = relative.ahead < 0 ? 'behind' : (relative.lateral > 0 ? 'right' : 'left')
     advice.text = relative.ahead < 0
       ? 'Turn around and keep going'
       : `Keep going ${relative.lateral > 0 ? 'right' : 'left'} around it`
   } else {
+    advice.cue = relative.vertical > 0 ? 'up' : 'down'
     advice.text = relative.vertical > 0 ? 'Raise the phone and orbit higher' : 'Lower the phone a little'
   }
   return advice
@@ -146,18 +156,19 @@ function orbitAdvice (state) {
 function walkAdvice (state) {
   const { viewer, shots, seconds } = state
   if (!shots.length) {
-    return { capture: seconds >= WALK.minSeconds, progress: 0, text: 'Start walking', warning: null, arrow: null, target: null }
+    return { capture: seconds >= WALK.minSeconds, cue: 'start', progress: 0, text: 'Start walking', warning: null, arrow: null, target: null }
   }
 
   const last = shots[shots.length - 1]
   const travel = distance(viewer.position, last.position)
   const turn = angleBetween(viewer.forward, last.forward)
-  const advice = { capture: false, progress: 0, target: null, arrow: null, text: '', warning: null }
+  const advice = { capture: false, cue: 'walk', progress: 0, target: null, arrow: null, text: '', warning: null, distance: travel }
 
   // Turning a lot from a spot you have not left is exactly how you end up with a
   // panorama, which is the one capture no amount of matching can rescue.
   if (turn >= WALK.rotationBaseline && travel < WALK.spinTravel) {
     advice.warning = 'You are turning on the spot — walk sideways instead'
+    advice.cue = 'spin'
   }
 
   const earned = travel >= WALK.baseline || (turn >= WALK.rotationBaseline && travel >= WALK.rotationMinTravel)
@@ -175,7 +186,7 @@ function walkAdvice (state) {
 export function advise (state) {
   if (state.mode === 'orbit') {
     return state.plan ? orbitAdvice(state) : {
-      capture: false, progress: 0, target: null, arrow: null, warning: null,
+      capture: false, cue: 'subject', progress: 0, target: null, arrow: null, warning: null,
       text: 'Point at the middle of your subject and set it'
     }
   }

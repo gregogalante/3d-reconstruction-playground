@@ -10,7 +10,7 @@
 import * as api from './lib/api.js'
 import { capabilities, startSession, sharpnessOf } from './lib/xr.js'
 import { advise, planOrbit, recordShot, coveredTargets } from './lib/guidance.js'
-import { drawRadar } from './lib/radar.js'
+import { drawRadar, drawCoverageRing } from './lib/radar.js'
 import { forwardOf } from './lib/vec.js'
 import { createSimulator } from './lib/simulate.js'
 
@@ -23,6 +23,8 @@ const ABSOLUTE_SHARPNESS = 8
 // what this capture has been seeing rather than an absolute number.
 const RELATIVE_SHARPNESS = 0.55
 const SHARPNESS_MEMORY = 12
+// How long a JPEG encode is given before the frame is written off, see `shoot`.
+const ENCODE_TIMEOUT = 2500
 
 const state = {
   mode: 'orbit',
@@ -38,7 +40,10 @@ const state = {
   hit: null,
   rejected: 0,
   video: null,
-  interval: null
+  interval: null,
+  milestone: 0,
+  spokenCue: null,
+  spokenAt: 0
 }
 
 const scratch = el('scratch')
@@ -78,7 +83,10 @@ async function checkCapabilities () {
     start.textContent = 'Start without guidance'
     const note = document.createElement('li')
     note.className = 'no'
-    note.innerHTML = '<span>Falling back to a plain camera: shots are yours to place</span>'
+    // On Android the usual cause is one missing app, and saying so beats a shrug
+    note.innerHTML = /android/i.test(navigator.userAgent)
+      ? '<span>Install <a href="https://play.google.com/store/apps/details?id=com.google.ar.core">Google Play Services for AR</a> to get the guidance, or capture without it</span>'
+      : '<span>Falling back to a plain camera: shots are yours to place</span>'
     list.appendChild(note)
   }
   state.device = { userAgent: navigator.userAgent, ...report }
@@ -129,8 +137,19 @@ async function shoot (canvas, viewer, extra = {}) {
     state.scores.push(score)
     if (state.scores.length > SHARPNESS_MEMORY) state.scores.shift()
 
-    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.92))
-    if (!blob) return false
+    // toBlob hands the encode to another thread and there is no guarantee it comes back:
+    // a browser that defers it — a backgrounded tab is enough — would leave this await
+    // pending for good, and with it the guard above, so the capture would stop dead
+    // without saying anything. Losing one frame to a stalled encoder is the better half
+    // of that trade.
+    const blob = await Promise.race([
+      new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.92)),
+      new Promise(resolve => window.setTimeout(() => resolve(null), ENCODE_TIMEOUT))
+    ])
+    if (!blob) {
+      flash('The encoder stalled — frame skipped')
+      return false
+    }
 
     state.uploader.push(blob, {
       mode: state.mode,
@@ -143,6 +162,7 @@ async function shoot (canvas, viewer, extra = {}) {
     if (viewer) state.shots.push(recordShot(state.plan, viewer))
     el('hud-count').textContent = state.shots.length || state.uploader.counts.uploaded + state.uploader.counts.pending
     showThumbnail(blob)
+    buzz(30)
     return true
   } finally {
     state.capturing = false
@@ -176,6 +196,54 @@ function showWarning (message) {
 }
 
 // ----------------------------------------------------------------------------
+// FEEDBACK YOU DO NOT HAVE TO LOOK AT
+// ----------------------------------------------------------------------------
+
+// Walking around a thing, you are watching the thing, not the phone. The screen is
+// held up in front of the subject and read at a glance if at all, so the guidance also
+// leaves through the speaker and the vibration motor.
+const SPOKEN = {
+  right: 'keep going right',
+  left: 'keep going left',
+  up: 'raise the phone',
+  down: 'lower the phone',
+  behind: 'turn around and keep going',
+  close: 'step back',
+  far: 'step closer',
+  aim: 'point at the subject',
+  spin: 'walk sideways, do not turn on the spot',
+  complete: 'every angle covered',
+  subject: 'point at your subject, then set it',
+  start: 'start walking'
+}
+const MILESTONES = [[0.25, 'a quarter of the way'], [0.5, 'half way'], [0.75, 'three quarters']]
+const SAY_NEW_CUE_AFTER = 2000
+const REPEAT_CUE_AFTER = 9000
+
+function say (line, { force = false } = {}) {
+  if (!line || !el('voice').checked || !window.speechSynthesis) return
+  if (force) window.speechSynthesis.cancel()
+  const utterance = new window.SpeechSynthesisUtterance(line)
+  utterance.rate = 1.1
+  window.speechSynthesis.speak(utterance)
+}
+
+function speakCue (cue) {
+  const line = SPOKEN[cue]
+  const now = window.performance.now()
+  const since = now - state.spokenAt
+  // a changed cue is news and interrupts; the same one repeats slowly, as a reminder
+  if (cue === state.spokenCue ? since < REPEAT_CUE_AFTER : since < SAY_NEW_CUE_AFTER) return
+  state.spokenCue = cue
+  state.spokenAt = now
+  say(line, { force: true })
+}
+
+function buzz (pattern) {
+  if (navigator.vibrate) navigator.vibrate(pattern)
+}
+
+// ----------------------------------------------------------------------------
 // GUIDED SESSION
 // ----------------------------------------------------------------------------
 
@@ -194,6 +262,8 @@ async function runGuided () {
   if (SIMULATE) window.captureDebug = { session, state, shoot }
 
   el('subject-prompt').hidden = state.mode !== 'orbit'
+  el('ring').hidden = state.mode !== 'orbit'
+  el('radar').hidden = state.mode === 'orbit'
 
   session.run((pose, frame) => {
     if (!pose) return
@@ -259,16 +329,43 @@ function paint (advice, session) {
     el('hud-count').textContent = `${state.shots.length} · ${Math.round(advice.progress * 100)}%`
   }
 
+  const distance = el('hud-distance')
+  distance.hidden = advice.distance == null
+  if (advice.distance != null) {
+    distance.textContent = `${advice.distance.toFixed(1)} m`
+    distance.style.color = ['close', 'far'].includes(advice.cue) ? 'var(--warn)' : ''
+  }
+
+  speakCue(advice.warning ? 'spin' : advice.cue)
+  announceMilestone(advice.progress)
+
   const now = window.performance.now()
   if (now - state.lastRadar > 100) {
     state.lastRadar = now
-    drawRadar(el('radar'), { plan: state.plan, shots: state.shots, viewer: state.viewer })
+    // one or the other: the ring is the better map when there is an orbit to fill, and
+    // the trail is the only one that means anything when there is not
+    if (state.mode === 'orbit') {
+      drawCoverageRing(el('ring'), { plan: state.plan, shots: state.shots, viewer: state.viewer })
+    } else {
+      drawRadar(el('radar'), { plan: state.plan, shots: state.shots, viewer: state.viewer })
+    }
   }
 
   if (session && !session.hasCamera && !SIMULATE && !state.warnedCamera) {
     state.warnedCamera = true
     flash('This session tracks but will not hand over frames: no camera-access')
   }
+}
+
+// Crossing a quarter of the orbit is worth knowing about without reading anything, and
+// it is the only moment a capture has that feels like progress.
+function announceMilestone (progress) {
+  if (!progress) return
+  const reached = MILESTONES.filter(([fraction]) => progress >= fraction).length
+  if (reached <= state.milestone) return
+  state.milestone = reached
+  buzz([25, 70, 25])
+  say(MILESTONES[reached - 1][1], { force: true })
 }
 
 function setSubject () {
@@ -384,8 +481,43 @@ function verdict (frames) {
   return 'Looks like a complete capture'
 }
 
-async function finish ({ ended = false } = {}) {
+// The expensive mistake is walking away from a capture that cannot reconstruct, and
+// finding out after a pipeline run. So a thin one is argued with, once, while the
+// subject is still in front of you — unless the session itself is ending, where there is
+// nothing left to go back to.
+function tooThinToLeave () {
+  if (state.shots.length < 12) {
+    return `Only ${state.shots.length} frames so far. That is unlikely to reconstruct.`
+  }
+  if (!state.plan) return null
+  const covered = coveredTargets(state.plan, state.shots).filter(Boolean).length / state.plan.targets.length
+  return covered < 0.6
+    ? `Only ${Math.round(covered * 100)}% of the way around. The far side will be missing.`
+    : null
+}
+
+function askBeforeFinishing (message) {
+  el('confirm-text').textContent = message
+  el('confirm-finish').hidden = false
+  say(message)
+  return new Promise(resolve => {
+    el('keep-going').onclick = () => {
+      el('confirm-finish').hidden = true
+      resolve(false)
+    }
+    el('finish-anyway').onclick = () => {
+      el('confirm-finish').hidden = true
+      resolve(true)
+    }
+  })
+}
+
+async function finish ({ ended = false, forced = false } = {}) {
   if (!state.server) return
+
+  const thin = ended || forced ? null : tooThinToLeave()
+  if (thin && !await askBeforeFinishing(thin)) return
+
   const server = state.server
   state.server = null
 

@@ -118,8 +118,29 @@ A capture dies of three things, and each has a rule in `capture/lib/guidance.js`
   perfectly in focus.
 
 Two rings of twelve targets at 8° and 28° of elevation, because one ring reconstructs a
-band and leaves the top of the object a guess. The radar in the corner is the map of what
-is covered; the arrow points at the nearest target you have not.
+band and leaves the top of the object a guess.
+
+### Told without looking
+
+Walking around a subject you are watching the subject, not the phone, so the guidance
+leaves by three doors:
+
+- **the coverage dial around the shutter**, two rings of segments filling in as you go.
+  It answers *which side have I not done*, which a percentage cannot and a map only can
+  if you stop to read it. World fixed, since a dial spinning with the phone is unusable
+  while walking. The walk mode has the breadcrumb radar instead, where there is no orbit
+  to fill.
+- **the voice**: every advice carries a stable `cue` — `right`, `up`, `close`, `spin`,
+  `complete` — spoken through `SpeechSynthesis`, a changed cue interrupting and the same
+  one repeating every nine seconds. Cues rather than the on screen sentence, so wording
+  and speech cannot drift apart.
+- **the vibration motor**: one buzz per frame, a triple at each quarter of the orbit.
+
+Two more things the UI refuses to let happen quietly. Finishing a capture under twelve
+frames or under 60% coverage is argued with once — *keep capturing* or *finish anyway* —
+because the expensive way to discover a thin capture is an hour into a pipeline run.
+And a JPEG encode that never comes back cannot wedge the session: `toBlob` races a
+timeout, so a stalled encoder costs one frame instead of every frame after it.
 
 ### Three ways it can capture
 
@@ -137,10 +158,20 @@ mode only.
 ### What lands on disk
 
 `train/capture_00000.jpg` upwards, named so that sorting them replays the capture, and
-`capture.json` holding per frame: the WebXR pose (position, orientation, matrix), the
-intrinsics derived from the projection matrix *plus the raw matrix*, both sharpness
-scores (the phone's and the server's), and the size. Written after every frame through a
-temporary file, so a phone that walks out of range still leaves a readable manifest.
+`capture.json` as `{dataset, convention, sessions: [...]}`, each session holding per
+frame: the WebXR pose (position, orientation, matrix), the intrinsics derived from the
+projection matrix *plus the raw matrix*, both sharpness scores (the phone's and the
+server's), and the size. Written after every frame through a temporary file, so a phone
+that walks out of range still leaves a readable manifest.
+
+**A dataset can be captured in several passes** — a room in two halves, a second lap for
+the side that came out thin, or two phones at once — so frames are numbered against the
+folder rather than the session, and the manifest is read-modify-written to keep the
+earlier sessions. The first version of this did neither: a second capture into the same
+dataset restarted at `capture_00000.jpg`, overwriting the first pass frame by frame, and
+replaced the manifest with its own frames. Session ids carry a random tail for the same
+reason — they were timestamps to the second, and two sessions opened in one second
+shared an id, which made the second inherit the first one's frames.
 
 The poses are stored, not used. They are in the WebXR frame — right handed, +Y up, camera
 down -Z — and COLMAP is the opposite on both counts; the `convention` field in the
@@ -150,13 +181,14 @@ obvious next thing and is not done.
 
 ### Verified, and not
 
-Verified here: certificate generation and the SANs, TLS on the LAN address, the whole
-API (upload, undo, finish, a name that tries to escape `storage/datasets`, a body that is
-not an image), the guidance rules under `node --test`, a full simulated capture to 100%
-coverage with blur rejection firing, the `getUserMedia` path against a canvas backed fake
-camera, and — the one that matters — 16 real photos replayed through the HTTP API and
-reconstructed by the pipeline into the same models the same photos give when copied by
-hand.
+Verified here: certificate generation and the SANs, TLS on the LAN address, the QR at
+startup, the whole API (upload, undo, finish, two passes into one dataset keeping both,
+a name that tries to escape `storage/datasets`, a body that is not an image), the
+guidance rules under `node --test`, a full simulated capture to 100% coverage with blur
+rejection firing, the voice and vibration cues, the argument against finishing a thin
+capture, the `getUserMedia` path against a canvas backed fake camera, and — the one that
+matters — 16 real photos replayed through the HTTP API and reconstructed by the pipeline
+into the same models the same photos give when copied by hand.
 
 **Not verified: a real Android phone.** No device was in the loop, so the WebXR session,
 `camera-access` readback and the ARCore poses are written against the specification and

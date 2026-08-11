@@ -12,6 +12,53 @@ const COLOURS = {
   subject: '#fbbf24'
 }
 
+// Coverage as a dial around the shutter: two rings of segments, one per guidance target,
+// filling in as you walk. It answers "which side have I not done" at a glance, which a
+// percentage cannot and a map only can if you stop to read it. World fixed on purpose —
+// a dial that span with the phone would be unreadable while walking.
+export function drawCoverageRing (canvas, { plan, shots, viewer }) {
+  const context = canvas.getContext('2d')
+  const size = canvas.width
+  const middle = size / 2
+  context.clearRect(0, 0, size, size)
+  if (!plan) return
+
+  const covered = coveredTargets(plan, shots)
+  const elevations = [...new Set(plan.targets.map(target => target.elevation))].sort((a, b) => a - b)
+  const perRing = plan.targets.length / elevations.length
+  const span = (Math.PI * 2 / perRing) * 0.82 // the gap between segments is the rest
+
+  context.lineCap = 'butt'
+  const outer = middle - 22
+  plan.targets.forEach((target, index) => {
+    // the higher orbit is drawn as the outer ring, the way it sits in the world
+    const ring = elevations.length - 1 - elevations.indexOf(target.elevation)
+    const radius = outer - ring * 20
+    const angle = target.azimuth * Math.PI / 180
+    context.beginPath()
+    context.arc(middle, middle, radius, angle - span / 2, angle + span / 2)
+    context.strokeStyle = covered[index] ? COLOURS.covered : 'rgba(148, 163, 184, 0.28)'
+    context.lineWidth = 13
+    context.stroke()
+  })
+
+  if (!viewer) return
+  // where the person is standing, around the subject
+  const direction = [viewer.position[0] - plan.centre[0], viewer.position[2] - plan.centre[2]]
+  const heading = Math.atan2(direction[1], direction[0])
+  context.save()
+  context.translate(middle, middle)
+  context.rotate(heading)
+  context.beginPath()
+  context.moveTo(middle - 6, 0)
+  context.lineTo(middle - 20, -7)
+  context.lineTo(middle - 20, 7)
+  context.closePath()
+  context.fillStyle = COLOURS.viewer
+  context.fill()
+  context.restore()
+}
+
 export function drawRadar (canvas, { plan, shots, viewer }) {
   const context = canvas.getContext('2d')
   const size = canvas.width

@@ -23,6 +23,33 @@
     <small id="dataset-note"></small>
   </label>
 
+  <!-- The one thing worth understanding before starting, as a picture: shots have to come
+       from different places. Turning on the spot produces a panorama, which has no
+       parallax and therefore nothing to triangulate. -->
+  <figure class="explain">
+    <svg viewBox="0 0 320 108" role="img" aria-label="Walk around the subject; do not turn on the spot">
+      <g fill="none" stroke-width="2">
+        <rect x="60" y="42" width="26" height="26" rx="4" fill="#fbbf24" stroke="none"/>
+        <g stroke="#4ade80">
+          <circle cx="73" cy="55" r="38" stroke-dasharray="3 5" opacity="0.5"/>
+          <g fill="#4ade80" stroke="none">
+            <circle cx="111" cy="55" r="4"/><circle cx="100" cy="82" r="4"/><circle cx="73" cy="93" r="4"/>
+            <circle cx="46" cy="82" r="4"/><circle cx="35" cy="55" r="4"/><circle cx="46" cy="28" r="4"/>
+            <circle cx="73" cy="17" r="4"/><circle cx="100" cy="28" r="4"/>
+          </g>
+        </g>
+        <path d="M133 46 l9 9 -9 9" stroke="#4ade80" stroke-linecap="round" stroke-linejoin="round"/>
+        <rect x="234" y="42" width="26" height="26" rx="4" fill="#fbbf24" stroke="none"/>
+        <g stroke="#f87171">
+          <circle cx="247" cy="97" r="4" fill="#f87171" stroke="none"/>
+          <path d="M247 93 L214 34 M247 93 L247 28 M247 93 L280 34" opacity="0.65"/>
+          <path d="M296 40 l16 16 M312 40 l-16 16" stroke-linecap="round"/>
+        </g>
+      </g>
+    </svg>
+    <figcaption><b>Walk around it.</b> Turning on the spot makes a panorama, and a panorama has no depth.</figcaption>
+  </figure>
+
   <fieldset class="field">
     <span>What are you capturing?</span>
     <div class="choice" id="mode">
@@ -61,6 +88,7 @@
   <div class="hud-top">
     <div class="pill" id="hud-dataset">dataset</div>
     <div class="pill" id="hud-count">0</div>
+    <div class="pill" id="hud-distance" hidden>—</div>
     <div class="pill queue" id="hud-queue" hidden>0</div>
     <button type="button" id="finish" class="pill danger">Finish</button>
   </div>
@@ -72,15 +100,22 @@
   </div>
 
   <div class="hud-bottom">
-    <canvas id="radar" class="radar" width="240" height="240"></canvas>
-    <div class="controls">
-      <button type="button" id="shutter" class="shutter" aria-label="Capture"></button>
+    <div class="side">
+      <canvas id="radar" class="radar" width="240" height="240" hidden></canvas>
       <label class="toggle">
         <input type="checkbox" id="auto" checked>
         <span>Auto</span>
       </label>
+      <label class="toggle">
+        <input type="checkbox" id="voice" checked>
+        <span>Voice</span>
+      </label>
     </div>
-    <div class="last">
+    <div class="dial">
+      <canvas id="ring" width="336" height="336"></canvas>
+      <button type="button" id="shutter" class="shutter" aria-label="Capture"></button>
+    </div>
+    <div class="side last">
       <img id="thumb" alt="" hidden>
       <button type="button" id="undo" class="pill" hidden>Undo</button>
     </div>
@@ -89,6 +124,14 @@
   <div class="hud-subject" id="subject-prompt" hidden>
     <p>Point at the middle of your subject from where you want to orbit, then set it.</p>
     <button type="button" id="set-subject" class="primary">Set subject</button>
+  </div>
+
+  <!-- The last chance to notice a capture is too thin, while you are still standing
+       in front of the subject rather than an hour into a pipeline run. -->
+  <div class="hud-subject" id="confirm-finish" hidden>
+    <p id="confirm-text"></p>
+    <button type="button" id="keep-going" class="primary">Keep capturing</button>
+    <button type="button" id="finish-anyway" class="pill danger wide">Finish anyway</button>
   </div>
 </section>
 
