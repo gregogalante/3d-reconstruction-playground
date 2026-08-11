@@ -22,6 +22,7 @@ of their way keeps it starting instantly and running next to a pipeline that is 
 import io
 import re
 import json
+import uuid
 import socket
 import argparse
 import datetime
@@ -46,6 +47,11 @@ MAX_FRAME_BYTES = 12 * 1024 * 1024
 # Frames are named so that sorting them is replaying the capture: pipeline.py decimates
 # and picks holdouts on the sorted names, and a capture is meaningful in order.
 FRAME_NAME = "capture_{:05d}.jpg"
+
+# WebXR hands out poses in its own frame, and nothing downstream reads them back blindly:
+# this line is what a later conversion has to be written against.
+CONVENTION = ("WebXR world-from-camera in the session reference space: right handed, "
+              "+Y up, the camera looks down -Z. COLMAP is the other way round on both.")
 
 app = FastAPI()
 sessions = {}
@@ -152,13 +158,51 @@ def sharpness(image):
     return float(cv2.Laplacian(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY), cv2.CV_32F).var())
 
 
+def next_index(dataset_path):
+    """The number the next frame gets, past everything already in the folder.
+
+    A dataset can be captured in more than one pass — a room in two halves, a second
+    lap for the side that came out thin — and numbering from zero each time overwrites
+    the first pass frame by frame.
+    """
+    highest = -1
+    for path in (dataset_path / "train").glob("capture_*.jpg"):
+        try:
+            highest = max(highest, int(path.stem.split("_")[1]))
+        except (IndexError, ValueError):
+            continue
+    return highest + 1
+
+
+def load_manifest(dataset_path):
+    """What earlier captures left behind, so this one is added rather than substituted."""
+    path = dataset_path / "capture.json"
+    if not path.exists():
+        return {"dataset": dataset_path.name, "convention": CONVENTION, "sessions": []}
+    try:
+        manifest = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        # a manifest truncated by a crash is not worth losing a capture over
+        return {"dataset": dataset_path.name, "convention": CONVENTION, "sessions": []}
+    manifest.setdefault("sessions", [])
+    return manifest
+
+
 def write_manifest(session):
     """Rewrite capture.json, so a session that dies mid capture still leaves its poses.
 
-    Written through a temporary file in the same folder: a phone that drops off the
+    Read, replace this session's entry, write: two phones can capture into one dataset
+    at once, and each has to find the other's frames still there afterwards. Written
+    through a temporary file in the same folder, since a phone that drops off the
     network mid write would otherwise leave a truncated manifest behind.
     """
-    manifest = {key: value for key, value in session.items() if key != "path"}
+    manifest = load_manifest(session["path"])
+    manifest["dataset"] = session["dataset"]
+    manifest["convention"] = CONVENTION
+    record = {key: value for key, value in session.items() if key not in ("path", "convention")}
+    manifest["sessions"] = [entry for entry in manifest["sessions"]
+                            if entry.get("id") != session["id"]] + [record]
+
     path = session["path"] / "capture.json"
     temporary = path.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(manifest, indent=2))
@@ -202,18 +246,16 @@ async def open_session(body: dict):
     existing = train_photos(dataset)
 
     session = {
-        "id": datetime.datetime.now().strftime("%Y%m%d-%H%M%S"),
+        # timestamp for reading, random tail for uniqueness: two phones opening a capture
+        # in the same second would otherwise share an id, and the second would inherit
+        # the first one's frames and overwrite its entry in the manifest
+        "id": f"{datetime.datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}",
         "dataset": dataset,
         "mode": mode,
         "started": datetime.datetime.now().isoformat(timespec="seconds"),
         "finished": None,
         "device": body.get("device") or {},
         "tracking": body.get("tracking") or "unknown",
-        # WebXR hands out poses in its own frame, and the pipeline never reads them back
-        # blindly: this line is what a later conversion has to be written against
-        "convention": ("WebXR world-from-camera in the session reference space: right "
-                       "handed, +Y up, the camera looks down -Z. COLMAP is the other way "
-                       "round on both counts."),
         "frames": [],
         "path": DATASETS / dataset,
     }
@@ -249,7 +291,11 @@ async def upload_frame(session_id: str, frame: UploadFile = File(...), meta: str
     except Exception as error:
         raise HTTPException(400, f"Not a readable image: {error}")
 
-    index = len(session["frames"])
+    # numbered against the folder, not against this session: two phones can be filling
+    # the same dataset, and a second pass must not land on the first pass's frames
+    index = next_index(session["path"])
+    while (session["path"] / "train" / FRAME_NAME.format(index)).exists():
+        index += 1
     name = FRAME_NAME.format(index)
     (session["path"] / "train" / name).write_bytes(payload)
 
