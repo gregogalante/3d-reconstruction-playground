@@ -22,7 +22,8 @@ relocalisation against a reconstruction, served to a small web UI.
 ```bash
 python pipeline.py --dataset storage/datasets/home --reset   # sfm + dense + splat
 python relocation.py --dataset storage/datasets/home --image storage/inputs/relocation_home.jpg --output storage/relocations/home
-python server.py
+python server.py            # the viewer, http://localhost:8000
+python capture_server.py    # capture from a phone, https://<lan-ip>:8443
 ```
 
 ## Layout
@@ -45,6 +46,10 @@ python server.py
 - `libs/colmap2nerf.py` — COLMAP model to `transforms.json` (upstream instant-ngp
   script, kept as is). Run as `python -m libs.colmap2nerf`: it has no main guard, so
   importing it would execute it.
+- `capture_server.py` + `capture/` — the phone capture server and its page (see below).
+  Free of pycolmap and torch on purpose: it only writes files, and stays startable while
+  a pipeline is busy. `capture/lib/` is plain ES modules, JavaScript Standard Style, and
+  the guidance in it is the one part with tests (`node --test 'capture/lib/*.test.js'`).
 - `relocation.py` — localise a query image against an existing reconstruction (see below).
 - `libs/localizer.py` — the retrieval, matching and PnP behind it.
 - `libs/evaluation.py` — leave one out relocalisation over a dataset's own images, run
@@ -64,6 +69,102 @@ python server.py
   `database.db`, `sfm/`, `dense/`, `splat/`, `config.json` (the constants and CLI
   options of the run), `time.json` (seconds per step, rewritten every run: a step whose
   output was already on disk reads as ~0). Git-ignored.
+
+## Capturing from a phone
+
+`capture_server.py` plus the static page in `capture/` turn an Android phone into the
+camera of the pipeline. The phone opens the page over the local network, walks a guided
+capture, and the frames land in `storage/datasets/<name>/train/` with the ARCore poses
+beside them in `capture.json`. Nothing downstream changes: `pipeline.py` reads that
+`train/` like any other.
+
+```bash
+python capture_server.py                 # TLS on 8443, prints a QR of the LAN address
+python capture_server.py --http --port 8444   # localhost or adb reverse only
+node --test 'capture/lib/*.test.js'      # the guidance rules
+```
+
+### Why it insists on HTTPS
+
+The guidance rides on WebXR, which Chrome on Android implements over ARCore, and both
+WebXR and the camera are handed out to secure contexts only. `http://192.168.x.y` is not
+one. So the server generates a self signed certificate carrying the LAN address as a
+subject alternative name — without a matching SAN Chrome refuses the origin instead of
+offering the warning you can click through — and serves TLS. Three ways in, in order of
+how much they hurt:
+
+1. **USB**: `adb reverse tcp:8443 tcp:8443`, then `https://localhost:8443` on the phone.
+   localhost is trusted, so no warning at all.
+2. **Wi-Fi**: scan the QR, accept the certificate warning once (Advanced → Proceed).
+3. `chrome://flags/#unsafely-treat-insecure-origin-as-secure` with the plain address, if
+   the certificate becomes a nuisance.
+
+The key lives in `storage/certs/`, which is git ignored — check that it stays that way.
+
+### What the guidance actually enforces
+
+A capture dies of three things, and each has a rule in `capture/lib/guidance.js`:
+
+- **Rotation without translation.** A panorama has no parallax, so nothing triangulates.
+  In orbit mode the shutter is gated on the angle *around the subject*, so standing still
+  and turning earns nothing however long you wait; in walk mode turning past 25° having
+  moved less than 12 cm raises a warning by name.
+- **Gaps.** Shots are taken every `ORBIT.angularStep` (12°) around the subject, which is
+  the overlap two neighbouring views need, and the ring targets tell you where to walk
+  next. Coverage is the fraction of targets a shot has passed within 18° of.
+- **Blur.** Every frame is scored by the variance of its Laplacian — the same measure
+  `pipeline.py` uses to pick frames out of a video — and dropped if it falls under 55% of
+  the running median of this capture. Relative, because a white wall scores low while
+  perfectly in focus.
+
+Two rings of twelve targets at 8° and 28° of elevation, because one ring reconstructs a
+band and leaves the top of the object a guess. The radar in the corner is the map of what
+is covered; the arrow points at the nearest target you have not.
+
+### Three ways it can capture
+
+| path | pose | frames | when |
+|---|---|---|---|
+| WebXR `immersive-ar` + `camera-access` | ARCore, 6DoF | the camera texture, read back through a framebuffer | Chrome on Android with ARCore |
+| `getUserMedia` | none | `<video>` drawn to a canvas | anything else, guidance falls back to blur and count |
+| simulator (`?simulate=1`) | fabricated orbit | a painted canvas, every 8th blurred | testing without a phone |
+
+They share one `shoot()` so the fallbacks cannot rot unnoticed. The simulator takes a
+`stepBy(ms)` on its own clock, which is how a whole capture can be replayed in a hidden
+tab where `requestAnimationFrame` never fires; `window.captureDebug` is published in that
+mode only.
+
+### What lands on disk
+
+`train/capture_00000.jpg` upwards, named so that sorting them replays the capture, and
+`capture.json` holding per frame: the WebXR pose (position, orientation, matrix), the
+intrinsics derived from the projection matrix *plus the raw matrix*, both sharpness
+scores (the phone's and the server's), and the size. Written after every frame through a
+temporary file, so a phone that walks out of range still leaves a readable manifest.
+
+The poses are stored, not used. They are in the WebXR frame — right handed, +Y up, camera
+down -Z — and COLMAP is the opposite on both counts; the `convention` field in the
+manifest is what a conversion has to be written against. Feeding them to COLMAP as pose
+priors, which would let spatial matching replace the quadratic exhaustive one, is the
+obvious next thing and is not done.
+
+### Verified, and not
+
+Verified here: certificate generation and the SANs, TLS on the LAN address, the whole
+API (upload, undo, finish, a name that tries to escape `storage/datasets`, a body that is
+not an image), the guidance rules under `node --test`, a full simulated capture to 100%
+coverage with blur rejection firing, the `getUserMedia` path against a canvas backed fake
+camera, and — the one that matters — 16 real photos replayed through the HTTP API and
+reconstructed by the pipeline into the same models the same photos give when copied by
+hand.
+
+**Not verified: a real Android phone.** No device was in the loop, so the WebXR session,
+`camera-access` readback and the ARCore poses are written against the specification and
+Chrome's implementation of it, and have never run. The first phone to open this will find
+whatever that missed — the likely candidates are the camera image resolution (it is the
+tracking stream, which on some devices is well under the 1024 px the pipeline wants) and
+the intrinsics derivation, which assumes the camera image is aligned with the view
+frustum.
 
 ## Video input
 

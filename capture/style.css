@@ -1,0 +1,248 @@
+/* Phone first, one hand, outdoors: big targets, high contrast, nothing that reflows
+   while you are walking. The HUD is drawn over a live camera, so every piece of text
+   sits on its own dark plate instead of trusting the scene behind it. */
+
+:root {
+  --bg: #0b0d10;
+  --panel: #161a21;
+  --line: #262d38;
+  --text: #e8ecf2;
+  --dim: #98a2b3;
+  --accent: #4ade80;
+  --warn: #fbbf24;
+  --danger: #f87171;
+  --plate: rgba(11, 13, 16, 0.72);
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+/* The screens below set `display`, which outranks the browser's own rule for [hidden]
+   and would leave every screen stacked on top of the others. */
+[hidden] { display: none !important; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.5 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+  overscroll-behavior: none;
+}
+
+.screen {
+  min-height: 100%;
+  padding: max(20px, env(safe-area-inset-top)) 20px max(20px, env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+h1 { margin: 0; font-size: 26px; letter-spacing: -0.02em; }
+.lead { margin: 6px 0 0; color: var(--dim); font-size: 14px; }
+code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+/* SETUP */
+
+.field { display: flex; flex-direction: column; gap: 8px; border: 0; padding: 0; margin: 0; }
+.field > span { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--dim); }
+.field small { color: var(--dim); font-size: 13px; min-height: 18px; }
+
+input[type="text"] {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: var(--text);
+  font-size: 18px;
+  padding: 14px 16px;
+}
+input[type="text"]:focus { outline: 2px solid var(--accent); border-color: transparent; }
+
+.choice { display: grid; gap: 10px; }
+.choice button {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: var(--text);
+  padding: 14px 16px;
+  font: inherit;
+}
+.choice button.selected { border-color: var(--accent); background: #14241a; }
+.choice small { color: var(--dim); font-size: 13px; }
+
+.capabilities { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 14px; }
+.capabilities li { display: flex; gap: 10px; align-items: baseline; color: var(--dim); }
+.capabilities li::before { content: "…"; width: 16px; color: var(--dim); }
+.capabilities li.yes::before { content: "✓"; color: var(--accent); }
+.capabilities li.no::before { content: "✗"; color: var(--danger); }
+.capabilities b { color: var(--text); font-weight: 600; }
+
+.primary {
+  background: var(--accent);
+  color: #04150b;
+  border: 0;
+  border-radius: 14px;
+  font: 600 18px/1 inherit;
+  padding: 18px;
+  margin-top: auto;
+}
+.primary:disabled { background: var(--line); color: var(--dim); }
+.error { color: var(--danger); font-size: 14px; margin: 0; }
+
+.help { border-top: 1px solid var(--line); padding-top: 14px; color: var(--dim); font-size: 14px; }
+.help summary { color: var(--text); cursor: pointer; }
+.help ol { padding-left: 20px; display: grid; gap: 8px; margin: 12px 0 0; }
+.help strong { color: var(--text); }
+
+/* HUD over the AR view */
+
+.hud {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: max(12px, env(safe-area-inset-top)) 12px max(12px, env(safe-area-inset-bottom));
+  pointer-events: none;
+}
+.hud button, .hud label, .hud input { pointer-events: auto; }
+
+.hud-top { display: flex; gap: 8px; align-items: center; }
+.hud-middle { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.hud-bottom { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; }
+
+.pill {
+  background: var(--plate);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--text);
+  font: 600 13px/1 inherit;
+  padding: 9px 14px;
+  backdrop-filter: blur(8px);
+}
+.pill.queue { color: var(--warn); }
+.pill.danger { color: var(--danger); margin-left: auto; }
+
+.guidance {
+  background: var(--plate);
+  border-radius: 12px;
+  margin: 0;
+  padding: 10px 16px;
+  text-align: center;
+  font-size: 17px;
+  font-weight: 600;
+  backdrop-filter: blur(8px);
+  max-width: 82vw;
+}
+.warning {
+  background: rgba(251, 191, 36, 0.16);
+  border: 1px solid var(--warn);
+  color: var(--warn);
+  border-radius: 12px;
+  margin: 0;
+  padding: 8px 14px;
+  font-size: 14px;
+  text-align: center;
+  max-width: 82vw;
+}
+
+/* The arrow points at the target you should walk to, rotated to screen space. */
+.arrow {
+  width: 78px;
+  height: 78px;
+  border-radius: 50%;
+  background: var(--plate);
+  border: 2px solid var(--accent);
+  position: relative;
+  transition: transform 120ms linear;
+}
+.arrow::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 0;
+  height: 0;
+  border: 16px solid transparent;
+  border-bottom-color: var(--accent);
+  transform: translateY(-6px);
+}
+.arrow.behind { border-color: var(--warn); }
+.arrow.behind::after { border-bottom-color: var(--warn); }
+
+.radar {
+  width: 110px;
+  height: 110px;
+  border-radius: 14px;
+  background: var(--plate);
+  border: 1px solid var(--line);
+}
+
+.controls { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.shutter {
+  width: 74px;
+  height: 74px;
+  border-radius: 50%;
+  background: #fff;
+  border: 5px solid rgba(255, 255, 255, 0.35);
+  background-clip: padding-box;
+}
+.shutter:active { transform: scale(0.94); }
+.shutter.armed { background: var(--accent); }
+
+.toggle { display: flex; align-items: center; gap: 6px; font-size: 13px;
+          background: var(--plate); border-radius: 999px; padding: 6px 12px; }
+.toggle input { width: 18px; height: 18px; accent-color: var(--accent); }
+
+.last { width: 110px; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+.last img { width: 64px; height: 64px; object-fit: cover; border-radius: 10px; border: 1px solid var(--line); }
+
+.hud-subject {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 18%;
+  background: var(--plate);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 16px;
+  display: grid;
+  gap: 12px;
+  pointer-events: auto;
+  backdrop-filter: blur(8px);
+}
+.hud-subject p { margin: 0; font-size: 15px; }
+.hud-subject .primary { margin: 0; padding: 14px; }
+
+/* Fallback camera */
+
+.plain { padding: 0; position: fixed; inset: 0; }
+.plain video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.plain-hud {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: center;
+  padding: max(12px, env(safe-area-inset-top)) 12px max(24px, env(safe-area-inset-bottom));
+}
+.plain-hud .hud-top { width: 100%; }
+
+/* Summary */
+
+#summary dl { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; margin: 0; }
+#summary dt { color: var(--dim); font-size: 14px; }
+#summary dd { margin: 0; font-variant-numeric: tabular-nums; }
+#summary pre {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px;
+  font-size: 13px;
+  overflow-x: auto;
+  margin: 0;
+}

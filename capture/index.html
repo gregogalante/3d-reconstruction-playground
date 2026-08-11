@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="theme-color" content="#0b0d10">
+  <title>Capture</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- SETUP: everything decided before the camera opens -->
+<section id="setup" class="screen">
+  <header>
+    <h1>Capture a dataset</h1>
+    <p class="lead">Your phone becomes the camera. Frames land in <code>train/</code>, ready for the pipeline.</p>
+  </header>
+
+  <label class="field">
+    <span>Dataset name</span>
+    <input id="dataset" type="text" inputmode="text" autocomplete="off" autocapitalize="none"
+           spellcheck="false" placeholder="kitchen-table">
+    <small id="dataset-note"></small>
+  </label>
+
+  <fieldset class="field">
+    <span>What are you capturing?</span>
+    <div class="choice" id="mode">
+      <button type="button" data-mode="orbit" class="selected">
+        <strong>An object</strong>
+        <small>You walk around it. Guided ring by ring.</small>
+      </button>
+      <button type="button" data-mode="walk">
+        <strong>A space</strong>
+        <small>You walk through it. Guided by how far you move.</small>
+      </button>
+    </div>
+  </fieldset>
+
+  <div class="field">
+    <span>This phone</span>
+    <ul id="capabilities" class="capabilities"></ul>
+  </div>
+
+  <button id="start" type="button" class="primary" disabled>Checking the phone…</button>
+  <p id="setup-error" class="error" hidden></p>
+
+  <details class="help">
+    <summary>The four rules of a dataset that reconstructs</summary>
+    <ol>
+      <li><strong>Move, do not spin.</strong> Turning on the spot gives a panorama, and a panorama has no depth to triangulate. Every shot must come from a different place.</li>
+      <li><strong>Overlap.</strong> Two neighbouring shots should share most of what they see. Big jumps leave holes nothing can bridge.</li>
+      <li><strong>Go around.</strong> One side of a thing reconstructs one side of a thing. Rings at different heights are what close a model.</li>
+      <li><strong>Hold still enough.</strong> Motion blur destroys the corners the whole method is built on. Blurred frames are rejected here rather than later.</li>
+    </ol>
+  </details>
+</section>
+
+<!-- HUD: the WebXR dom-overlay root, the only DOM visible while the AR session runs -->
+<section id="hud" class="hud" hidden>
+  <div class="hud-top">
+    <div class="pill" id="hud-dataset">dataset</div>
+    <div class="pill" id="hud-count">0</div>
+    <div class="pill queue" id="hud-queue" hidden>0</div>
+    <button type="button" id="finish" class="pill danger">Finish</button>
+  </div>
+
+  <div class="hud-middle">
+    <div id="arrow" class="arrow" hidden></div>
+    <p id="guidance" class="guidance">Hold the phone up and look at your subject</p>
+    <p id="warning" class="warning" hidden></p>
+  </div>
+
+  <div class="hud-bottom">
+    <canvas id="radar" class="radar" width="240" height="240"></canvas>
+    <div class="controls">
+      <button type="button" id="shutter" class="shutter" aria-label="Capture"></button>
+      <label class="toggle">
+        <input type="checkbox" id="auto" checked>
+        <span>Auto</span>
+      </label>
+    </div>
+    <div class="last">
+      <img id="thumb" alt="" hidden>
+      <button type="button" id="undo" class="pill" hidden>Undo</button>
+    </div>
+  </div>
+
+  <div class="hud-subject" id="subject-prompt" hidden>
+    <p>Point at the middle of your subject from where you want to orbit, then set it.</p>
+    <button type="button" id="set-subject" class="primary">Set subject</button>
+  </div>
+</section>
+
+<!-- FALLBACK: no WebXR, a plain camera with what guidance is left without a pose -->
+<section id="plain" class="screen plain" hidden>
+  <video id="video" playsinline muted autoplay></video>
+  <div class="plain-hud">
+    <div class="hud-top">
+      <div class="pill" id="plain-count">0</div>
+      <button type="button" id="plain-finish" class="pill danger">Finish</button>
+    </div>
+    <p id="plain-guidance" class="guidance">No AR tracking here: keep moving sideways between shots.</p>
+    <div class="controls">
+      <button type="button" id="plain-shutter" class="shutter" aria-label="Capture"></button>
+      <label class="toggle">
+        <input type="checkbox" id="plain-auto">
+        <span>Every 2s</span>
+      </label>
+    </div>
+  </div>
+</section>
+
+<!-- SUMMARY -->
+<section id="summary" class="screen" hidden>
+  <h1>Captured</h1>
+  <p id="summary-verdict" class="guidance"></p>
+  <dl id="summary-stats"></dl>
+  <p>Now build it on the machine holding the dataset:</p>
+  <pre id="summary-command"></pre>
+  <button type="button" id="again" class="primary">Capture another</button>
+</section>
+
+<canvas id="scratch" hidden></canvas>
+<script src="app.js" type="module"></script>
+</body>
+</html>
