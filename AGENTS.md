@@ -47,6 +47,8 @@ python server.py
   importing it would execute it.
 - `relocation.py` — localise a query image against an existing reconstruction (see below).
 - `libs/localizer.py` — the retrieval, matching and PnP behind it.
+- `libs/evaluation.py` — leave one out relocalisation over a dataset's own images, run
+  as the last pipeline step and written to `relocation.json` (see below).
 - `server.py` + `ui/` — FastAPI backend and viewer. `/api/datasets/<name>/clouds`
   reports which of the sparse, dense and splat clouds exist, the UI lets you switch
   between them and greys out the missing ones. The gaussians are served as
@@ -184,7 +186,9 @@ image dataset, so there is no pipeline artifact to keep in sync.
    The two passes are what makes dense a fallback instead of a competitor — see the
    dead end below.
 3. **Solve** PnP with LO-RANSAC at 4 px, then refine pose *and* intrinsics.
-4. **Report** inliers, mean reprojection error and a two panel `_overlay.jpg`: the
+4. **Report** inliers split by source (triangulated against lifted from dense depth, so
+   the run says on its own whether the fallback carried it), mean reprojection error and
+   a two panel `_overlay.jpg`: the
    query on the left, the model reprojected from the estimated pose on the right, and
    a line across the panels per inlier, from the keypoint to where its 3D point lands.
    Both panels share the viewpoint, so the lines are parallel when the pose is right
@@ -217,6 +221,84 @@ What actually mattered, measured against the table in [README.md](README.md):
   from 3.3% of the scene radius to 0.23%, and on `over-office-1` from 0.08% to 0.02%.
   Refining the focal alone is not enough (`home` stops at 1.08%).
 
+### Leave one out evaluation
+
+The last pipeline step (`libs/evaluation.py`, `--relocation-stride`, `--relocation-dense`)
+localises a spread of the dataset's own images against the model with each one hidden.
+One image every `RELOCATION_STRIDE`, clamped to `[RELOCATION_MIN_ITEMS,
+RELOCATION_MAX_ITEMS]`, spread uniformly over the sorted names so the sample covers
+different viewpoints. Report in `storage/datasets/<name>/relocation.json`, deleted by
+`--reset`, skipped when the file is already there.
+
+**It reports margins, not accuracy, because accuracy does not discriminate.** Hiding one
+image leaves its neighbours 5.7% of the scene radius away on `south-building`, roughly
+where the photographer stood: every healthy dataset lands within a hundredth of a
+percent, and a score built on that error reads 100% for all of them. What varies in
+production is whether a query registers *at all*, which depends on how far it sits from
+anything mapped. So each holdout climbs two ladders until the pose leaves the tolerance
+(`PASS_POSITION_PCT`, `PASS_ROTATION_DEG`), by binary search — three or four trials
+instead of the whole ladder:
+
+- **viewpoint** (`VIEWPOINT_LADDER`): hide the holdout *and* its k nearest views, so the
+  query has to be solved from further off the capture path. The margin is the distance
+  and viewing angle to the nearest view still in the model at the last rung that held —
+  `viewpoint_margin_pct` is the headline number, "it relocalises up to X% of the scene
+  radius away from anything mapped".
+- **appearance** (`APPEARANCE_LADDERS`): degrade the query itself in resolution, focus
+  and JPEG quality, and report the harshest level still solved. This is what decides
+  whether a photo taken later with another phone registers. It re-runs SIFT per trial,
+  so it covers `RELOCATION_APPEARANCE_ITEMS` of the holdouts, not all of them.
+
+The k = 0 rung is the old accuracy measurement and is still reported under `accuracy`,
+as the detail behind the margin rather than the headline.
+
+Both ladders run further than looks sensible on purpose. The first version stopped at 32
+hidden views, scale 0.15, blur 5 and JPEG 10, and `south-building` walked through all
+four ceilings — a ladder that ends before the model breaks measures the ladder. Rungs
+past the breaking point are free, the binary search never visits them. `capped_by_ladder`
+counts the holdouts that survived to the top, i.e. the ones whose reported margin is a
+floor rather than a measurement.
+
+Two things are hidden from the query, and the test is worthless without either:
+
+- **its rows in the retrieval index** (`localizer.hide_image`). Otherwise the query
+  retrieves *itself* first — measured, 553 votes against 90 for the runner up — and PnP
+  is handed the keypoints it is supposed to find. The reconstruction is left untouched:
+  only the index decides what can be retrieved and matched.
+- **its own camera** (`query_camera(exclude=...)`), so the query gets the median
+  intrinsics a real photo would get instead of the ones bundle adjustment fit on that
+  very image. Barely matters on a fixed lens capture (851.75 against 851.77 px on
+  `south-building`), matters on phone photos where the focal moves per shot.
+
+The ground truth is a *pseudo* one: those 3D points were adjusted with the holdout's
+observations too, so the model has partly seen the answer. At 128 images that is under
+1% of the constraints; on a twenty image dataset read the numbers as optimistic. Query
+descriptors come from `database.db` instead of a fresh SIFT pass (same file, same
+detector), so the check measures the localiser, not the resize and extract path around
+it in `relocation.py`. The degraded queries do go through a real SIFT pass, they have to.
+
+Baseline on `south-building` (128 images, 12 holdouts, 68 localisations, 4m36s, sparse):
+
+| | median | worst holdout | best |
+|---|---|---|---|
+| viewpoint margin | **56.9% of the scene radius** | 31.6% | 88.9% |
+| viewpoint margin, angle | 31.6° | 20.2° | 50.9° |
+| views hidden at the margin | 16 | 16 | 32 |
+| accuracy at k = 0 | 0.0158% of radius | 0.0317% | 0.0038% |
+| appearance: scale | 0.15 | 0.25 | |
+| appearance: blur | 5.0 px | 3.0 px | |
+| appearance: JPEG quality | 2 | 5 | |
+
+Read as: this model places a photo taken half a scene radius and 30 degrees away from
+anything it has seen, at a sixth of the resolution. The JPEG axis still bottoms out at
+quality 2 — compression is simply not what breaks relocation on a textured facade, and
+that axis only earns its place on a weaker dataset.
+
+The margin does discriminate where the old score did not: 31.6% against 88.9% between
+the weakest and the strongest holdout of the same dataset, so a regression in coverage
+shows up here long before it shows up in the position error.
+
+
 ### Measured dead ends
 
 - **Dense depth adds correspondences but not accuracy.** Lifting the matched keypoints
@@ -237,9 +319,15 @@ What actually mattered, measured against the table in [README.md](README.md):
 
   What that buys, precisely: on those queries the pose comes out the same either way,
   one pass or two, to well under a millimetre. The two passes are a guarantee that the
-  fallback cannot subtract from the sparse solution, not a measured accuracy gain — and
-  the queries were dataset images, the easiest case there is. Re-measure on a query
-  from outside the dataset before claiming more.
+  fallback cannot subtract from the sparse solution, not a measured accuracy gain.
+
+  The leave one out above settles the question on queries the model cannot retrieve as
+  themselves. Over 12 `south-building` holdouts the dense fallback adds 43% more inliers
+  (median 2638 against 1845) and **loses on accuracy**: better position on 3 of 12
+  images, better rotation on 2 of 12, worst case 0.0426% of radius against 0.0317%. It
+  also loses on the margin that matters, measured over 6 holdouts: median viewpoint
+  margin 40.1% of the scene radius against 45.9% sparse. More correspondences, less
+  reach. Off by default, and the number to watch when changing it.
 
   The saved JSON says which source the pose rests on: `dense_fallback`
   (`off` | `unavailable` | `on`), `num_sparse_inliers` and `num_dense_inliers` next to

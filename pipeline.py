@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from libs.read_write_model import read_cameras_binary, write_cameras_text, read_images_binary, write_images_text, read_points3D_binary, write_points3D_text
 from libs import cpu_mvs
+from libs import evaluation
 from libs.console import print_error, print_success, print_info, print_warning, print_step
 
 IMAGE_MAX_DIMENSION = 1024
@@ -27,6 +28,16 @@ VIDEO_EXTENSIONS = ('.mov', '.mp4', '.m4v')
 # Those maps are noisier than the GPU ones, hence the relaxed fusion thresholds.
 DENSE_MIN_NUM_PIXELS = 3
 DENSE_MAX_NORMAL_ERROR = 25.0
+
+# Leave one out relocalisation check: one image every RELOCATION_STRIDE is localised
+# against the model with itself hidden. The bounds keep it worth running on a small
+# capture and short on a large one, at roughly 8 seconds per image.
+RELOCATION_STRIDE = 10
+RELOCATION_MIN_ITEMS = 6
+RELOCATION_MAX_ITEMS = 20
+# The appearance ladder re-runs SIFT on a degraded copy of the query, so it costs about
+# twice a plain trial and runs on a spread of the holdouts instead of all of them.
+RELOCATION_APPEARANCE_ITEMS = 3
 
 ##############################################################################
 # ARGS
@@ -47,6 +58,8 @@ def parse_args():
   parser.add_argument("--splat-warmup", type=float, default=0.5, help="Fraction of the splat iterations trained on half resolution views (0 disables)")
   parser.add_argument("--splat-holdout", type=int, default=8, help="Keep every Nth view out of the splat training to measure novel view quality (0 disables)")
   parser.add_argument("--splat-device", default="cpu", choices=["cpu", "mps"], help="Torch device used to train the splat (mps is slower here, see AGENTS.md)")
+  parser.add_argument("--relocation-stride", type=int, default=RELOCATION_STRIDE, help=f"Localise one image every N with itself hidden, between {RELOCATION_MIN_ITEMS} and {RELOCATION_MAX_ITEMS} of them (0 skips the check)")
+  parser.add_argument("--relocation-dense", action="store_true", help="Also run the leave one out check with the dense depth fallback on, to compare the two")
   return parser.parse_args()
 
 ##############################################################################
@@ -413,6 +426,68 @@ def build_splat(dataset_path, args):
   print_success(f"Splat exported to {splat_ply_path}.")
 
 ##############################################################################
+# EVALUATE RELOCATION
+##############################################################################
+
+def evaluate_relocation(dataset_path, sfm_path, stride, use_dense):
+  """Localise a spread of the dataset's own images against the model, itself hidden.
+
+  The only measurement of the reconstruction that does not need a second opinion: the
+  model is asked to place photos whose pose it already agreed on. See libs/evaluation.py
+  for what is hidden from the query and why the ground truth is a pseudo one.
+  """
+  if stride <= 0:
+    print_info("Relocation check disabled by --relocation-stride 0. Skipping.")
+    return
+
+  if not os.path.exists(os.path.join(sfm_path, "0")):
+    print_error(f"SFM reconstruction {os.path.join(sfm_path, '0')} does not exist. Cannot evaluate relocation.")
+    return
+
+  report_path = os.path.join(dataset_path, "relocation.json")
+  if os.path.exists(report_path):
+    print_info(f"Relocation report {report_path} already exists. Skipping the check.")
+    return
+
+  # one load shared by both passes, it is a second of the eight a localisation costs
+  dataset = evaluation.load_dataset(dataset_path)
+  modes = {}
+
+  print_info("Pushing the holdouts off the capture path, against the triangulated points...")
+  modes["sparse"] = evaluation.evaluate(dataset_path, stride, RELOCATION_MIN_ITEMS, RELOCATION_MAX_ITEMS,
+                                        RELOCATION_APPEARANCE_ITEMS, use_dense=False, dataset=dataset,
+                                        log=print_info)
+  if use_dense:
+    print_info("Same holdouts, with the dense depth fallback on...")
+    modes["dense"] = evaluation.evaluate(dataset_path, stride, RELOCATION_MIN_ITEMS, RELOCATION_MAX_ITEMS,
+                                         RELOCATION_APPEARANCE_ITEMS, use_dense=True, dataset=dataset,
+                                         log=print_info)
+
+  # the headline number is the sparse one: that is the path relocation.py and the viewer
+  # take, the dense pass is only there to compare against it
+  report = {"viewpoint_margin_pct": modes["sparse"]["viewpoint_margin_pct"]["median"], **modes}
+  with open(report_path, "w") as handle:
+    json.dump(report, handle, indent=2)
+
+  for mode, result in modes.items():
+    if result["failed"]:
+      print_warning(f"{mode}: {len(result['failed'])} of {result['holdouts']} holdouts did not "
+                    f"register even with the whole model ({', '.join(result['failed'])})")
+    margin, angle = result["viewpoint_margin_pct"], result["viewpoint_margin_deg"]
+    print_success(f"{mode}: relocalises up to {margin['median']}% of the scene radius and "
+                  f"{angle['median']}° from the nearest mapped view (worst holdout {margin['worst']}%), "
+                  f"accuracy {result['accuracy']['position_error_pct']['median']}% of radius")
+    if result["capped_by_ladder"]:
+      print_info(f"  {result['capped_by_ladder']} holdouts survived the whole ladder, "
+                 f"their real margin is above what is reported")
+    if result["appearance"]:
+      appearance = result["appearance"]
+      print_success(f"{mode}: query holds down to {appearance['scale']['median']} of the resolution, "
+                    f"{appearance['blur']['median']} px of blur, JPEG quality {appearance['jpeg']['median']}")
+  print_success(f"Relocation margin of the dataset: {report['viewpoint_margin_pct']}% of the scene "
+                f"radius ({report_path})")
+
+##############################################################################
 # MAIN
 ##############################################################################
 
@@ -426,6 +501,7 @@ def main():
   sfm_path = os.path.join(dataset_path, 'sfm')
   dense_path = os.path.join(dataset_path, 'dense')
   splat_path = os.path.join(dataset_path, 'splat')
+  relocation_path = os.path.join(dataset_path, 'relocation.json')
 
   if not os.path.exists(dataset_path):
     print_error(f"Dataset path {dataset_path} does not exist.")
@@ -452,6 +528,10 @@ def main():
     "splat_warmup": args.splat_warmup,
     "splat_holdout": args.splat_holdout,
     "splat_device": args.splat_device,
+    "relocation_stride": args.relocation_stride,
+    "relocation_min_items": RELOCATION_MIN_ITEMS,
+    "relocation_max_items": RELOCATION_MAX_ITEMS,
+    "relocation_dense": args.relocation_dense,
   }
   with open(config_path, 'w') as f:
     json.dump(config, f, indent=2)
@@ -468,6 +548,8 @@ def main():
       shutil.rmtree(dense_path)
     if os.path.exists(splat_path):
       shutil.rmtree(splat_path)
+    if os.path.exists(relocation_path):
+      os.remove(relocation_path)
 
   steps = [
     ("Build Images", lambda: build_images(train_path, images_path)),
@@ -481,6 +563,7 @@ def main():
     ("Build Dense Depth Maps", lambda: build_dense_depth_maps(dense_path, args.dense_max_size, args.dense_num_src, args.dense_num_samples, args.dense_num_workers)),
     ("Build Dense Point Cloud", lambda: build_dense_point_cloud(dense_path)),
     # ("Build Gaussian Splat", lambda: build_splat(dataset_path, args)),
+    ("Evaluate Relocation", lambda: evaluate_relocation(dataset_path, sfm_path, args.relocation_stride, args.relocation_dense)),
   ]
 
   time_start = time.time()
