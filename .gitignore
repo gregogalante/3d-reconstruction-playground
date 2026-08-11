@@ -9,3 +9,5 @@ storage/relocations/*
 
 storage/inputs/*
 !storage/inputs/.keep
+# the capture server generates a TLS key here, it must never be committed
+storage/certs/
