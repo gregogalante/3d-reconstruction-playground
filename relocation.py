@@ -3,7 +3,6 @@ import sys
 import json
 import math
 import shutil
-import sqlite3
 import tempfile
 import argparse
 
@@ -13,7 +12,7 @@ import pycolmap
 from PIL import Image
 
 from libs.console import print_error, print_success, print_info, print_warning, print_step
-from libs.localizer import localize, query_camera
+from libs.localizer import localize, query_camera, extract_query_features
 
 ##############################################################################
 # ARGS
@@ -48,30 +47,6 @@ def prepare_query_image(image_path, tmp_dir, image_max_dimension):
     return out_path, img.size
 
 
-def extract_query_features(image_path):
-  """SIFT keypoints and descriptors of a single image, through pycolmap."""
-  tmp_dir = tempfile.mkdtemp(prefix="reloc_features_")
-  try:
-    # the database has to sit outside the image folder, COLMAP scans it for images
-    images_dir = os.path.join(tmp_dir, "images")
-    os.makedirs(images_dir)
-    shutil.copy2(image_path, os.path.join(images_dir, os.path.basename(image_path)))
-    database_path = os.path.join(tmp_dir, "query.db")
-    pycolmap.extract_features(database_path, images_dir, camera_mode=pycolmap.CameraMode.SINGLE)
-
-    connection = sqlite3.connect(database_path)
-    image_id = connection.execute("SELECT image_id FROM images LIMIT 1").fetchone()[0]
-    rows, cols, data = connection.execute("SELECT rows, cols, data FROM keypoints WHERE image_id=?", (image_id,)).fetchone()
-    keypoints = np.frombuffer(data, np.float32).reshape(rows, cols).copy()
-    rows, cols, data = connection.execute("SELECT rows, cols, data FROM descriptors WHERE image_id=?", (image_id,)).fetchone()
-    descriptors = np.frombuffer(data, np.uint8).reshape(rows, cols).copy()
-    connection.close()
-  finally:
-    shutil.rmtree(tmp_dir, ignore_errors=True)
-
-  print_info(f"Extracted {len(keypoints)} keypoints from the query image")
-  return keypoints, descriptors
-
 ##############################################################################
 # OUTPUT
 ##############################################################################
@@ -85,6 +60,7 @@ def build_relocation_data(result, image_path, dataset_path, camera, camera_sourc
     "reason": result.get("reason"),
     "num_correspondences": result.get("num_correspondences", 0),
     "retrieved_images": result.get("retrieved", []),
+    "dense_fallback": result.get("dense_fallback", "off"),
     "camera_source": camera_source,
     "camera_params": [float(p) for p in camera.params],
     "fovx": 2 * math.degrees(math.atan(camera.width / (2 * camera.params[0]))),
@@ -100,6 +76,10 @@ def build_relocation_data(result, image_path, dataset_path, camera, camera_sourc
     "num_inliers": result["num_inliers"],
     "num_sparse_correspondences": result["num_sparse_correspondences"],
     "num_dense_correspondences": result["num_dense_correspondences"],
+    # what the pose actually rests on, as opposed to what was merely available
+    "num_sparse_inliers": result["num_sparse_inliers"],
+    "num_dense_inliers": result["num_dense_inliers"],
+    "point_source": result["point_source"],
     "inlier_ratio": round(result["inlier_ratio"], 3),
     "reprojection_error": round(result["reprojection_error"], 3),
     "camera_center": (-rotation.T @ translation).tolist(),
@@ -224,7 +204,7 @@ def relocate(dataset_path, image_path, output_dir=None, retrieved=10, ratio=0.8,
     query_path, size = prepare_query_image(image_path, tmp_dir, image_max_dimension)
 
     print_step("Extract Query Features")
-    keypoints, descriptors = extract_query_features(query_path)
+    keypoints, descriptors = extract_query_features(query_path, log=print_info)
 
     print_step("Build Query Camera Model")
     exif_camera = None
@@ -250,6 +230,12 @@ def relocate(dataset_path, image_path, output_dir=None, retrieved=10, ratio=0.8,
                  f"({100 * result['inlier_ratio']:.0f}%), mean reprojection error "
                  f"{result['reprojection_error']:.2f} px")
       print_info(f"  Camera center: [{center[0]:.4f}, {center[1]:.4f}, {center[2]:.4f}]")
+      # which of the two sources carried the pose, the whole point of the --dense flag
+      fallback = {"off": "not requested", "unavailable": "requested, no depth maps in the dataset",
+                  "on": "on"}[result["dense_fallback"]]
+      print_info(f"  Points: {result['num_sparse_inliers']} triangulated inliers, "
+                 f"{result['num_dense_inliers']} lifted from dense depth "
+                 f"(dense fallback {fallback})")
       # the inlier ratio is not a quality signal here, correspondences are collected
       # generously on purpose, but a badly fitting inlier set is
       if result["reprojection_error"] > 2.0:

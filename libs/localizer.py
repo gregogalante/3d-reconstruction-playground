@@ -13,7 +13,9 @@ dense depth map when `use_dense` is on and the sparse model does not cover them.
 """
 
 import os
+import shutil
 import sqlite3
+import tempfile
 
 import numpy as np
 import pycolmap
@@ -42,6 +44,34 @@ def read_database(path):
   }
   connection.close()
   return names, keypoints, descriptors
+
+
+def extract_query_features(image_path, log=lambda *args: None):
+  """SIFT keypoints and descriptors of a single image, through pycolmap.
+
+  The same detector that filled the dataset's database, so the descriptors compare.
+  """
+  tmp_dir = tempfile.mkdtemp(prefix="reloc_features_")
+  try:
+    # the database has to sit outside the image folder, COLMAP scans it for images
+    images_dir = os.path.join(tmp_dir, "images")
+    os.makedirs(images_dir)
+    shutil.copy2(image_path, os.path.join(images_dir, os.path.basename(image_path)))
+    database_path = os.path.join(tmp_dir, "query.db")
+    pycolmap.extract_features(database_path, images_dir, camera_mode=pycolmap.CameraMode.SINGLE)
+
+    connection = sqlite3.connect(database_path)
+    image_id = connection.execute("SELECT image_id FROM images LIMIT 1").fetchone()[0]
+    rows, cols, data = connection.execute("SELECT rows, cols, data FROM keypoints WHERE image_id=?", (image_id,)).fetchone()
+    keypoints = np.frombuffer(data, np.float32).reshape(rows, cols).copy()
+    rows, cols, data = connection.execute("SELECT rows, cols, data FROM descriptors WHERE image_id=?", (image_id,)).fetchone()
+    descriptors = np.frombuffer(data, np.uint8).reshape(rows, cols).copy()
+    connection.close()
+  finally:
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+
+  log(f"Extracted {len(keypoints)} keypoints from the query image")
+  return keypoints, descriptors
 
 ##############################################################################
 # MATCHING
@@ -218,22 +248,29 @@ class DenseDepth:
 # CAMERA
 ##############################################################################
 
-def query_camera(reconstruction, size, name=None, exif_camera=None):
+def query_camera(reconstruction, size, name=None, exif_camera=None, exclude=None):
   """The intrinsics to localise with, best source first.
 
   COLMAP's EXIF inference falls back to a 1.2 x max dimension focal guess when the
   sensor is unknown, which is off by more than 50% on a phone wide angle lens and
   moves the estimated pose by metres. The reconstruction is calibrated on the very
   same photos, so it wins over any guess.
+
+  `exclude` hides one image from the model, camera included: a holdout evaluation has
+  to receive the intrinsics a real query would get, not the ones bundle adjustment fit
+  on that very photo.
   """
+  excluded_camera = None
   for image in reconstruction.images.values():
-    if image.name == name:
+    if image.name == exclude:
+      excluded_camera = image.camera_id
+    elif image.name == name:
       return reconstruction.cameras[image.camera_id], "reconstruction (same image)"
 
   if exif_camera is not None and exif_camera.has_prior_focal_length:
     return exif_camera, "exif"
 
-  cameras = list(reconstruction.cameras.values())
+  cameras = [camera for camera_id, camera in reconstruction.cameras.items() if camera_id != excluded_camera]
   aspect = size[0] / size[1]
   matching = [c for c in cameras if abs(c.width / c.height - aspect) < 0.02] or cameras
   focal = float(np.median([c.params[0] / max(c.width, c.height) for c in matching]))
@@ -293,31 +330,87 @@ def image_points(reconstruction, image, keypoints, dense=None, name=None):
   return points, ~np.isnan(points[:, 0]), sparse
 
 
+def load_dataset(dataset_path):
+  """Everything a localisation reads from disk, so a sweep over many queries pays once.
+
+  A single call spends about a second here against 8 on the matching, which is noise
+  for one relocalisation and two minutes over a 128 image leave one out. The depth maps
+  are loaded whenever the workspace has them, `use_dense` decides per call whether to
+  read them, so one context serves a sparse and a dense sweep.
+  """
+  reconstruction = pycolmap.Reconstruction(os.path.join(dataset_path, "sfm", "0"))
+  names, keypoints, descriptors = read_database(os.path.join(dataset_path, "database.db"))
+  dense_path = os.path.join(dataset_path, "dense")
+  return {
+    "reconstruction": reconstruction,
+    "images_path": os.path.join(dataset_path, "images"),
+    "names": names,
+    "keypoints": keypoints,
+    "descriptors": descriptors,
+    "index": build_point_index(reconstruction, descriptors),
+    "dense": DenseDepth(dense_path) if DenseDepth.available(dense_path) else None,
+  }
+
+
+def hide_image(index, image_ids):
+  """The point index without those images' observations, for a leave some out query.
+
+  Only the index has to forget them: retrieval ranks images out of these rows, so an
+  image absent from them is never retrieved and never matched. The reconstruction is
+  left alone, its points still carry the coordinates bundle adjustment gave them.
+  """
+  keep = ~np.isin(index["image_of_row"], np.atleast_1d(image_ids))
+  return {**index, "descriptors": index["descriptors"][keep],
+          "point_of_row": index["point_of_row"][keep], "image_of_row": index["image_of_row"][keep]}
+
+
 def localize(dataset_path, keypoints, descriptors, camera, num_retrieved=10, ratio=0.8,
              max_error=4.0, use_dense=False, min_inliers=30, min_focal_inliers=50,
-             enough=800, min_images=4, log=print):
+             enough=800, min_images=4, log=print, dataset=None, exclude=None):
   """Estimate the pose of a query image against the dataset's reconstruction.
 
   A photo of another scene still produces a pose, RANSAC will always find some minimal
   set that agrees, so a registration under `min_inliers` counts as a failure. That is
   COLMAP's own threshold for accepting an image into a reconstruction.
+
+  `dataset` takes a preloaded `load_dataset`, `exclude` one or more image ids to hide
+  from the model: together they are what makes a holdout evaluation cheap and honest.
   """
-  reconstruction = pycolmap.Reconstruction(os.path.join(dataset_path, "sfm", "0"))
-  names, db_keypoints, db_descriptors = read_database(os.path.join(dataset_path, "database.db"))
+  dataset = dataset if dataset is not None else load_dataset(dataset_path)
+  reconstruction = dataset["reconstruction"]
+  names, db_keypoints, db_descriptors = dataset["names"], dataset["keypoints"], dataset["descriptors"]
   descriptors = descriptors.astype(np.float32)
 
-  index = build_point_index(reconstruction, db_descriptors)
+  index = dataset["index"] if exclude is None else hide_image(dataset["index"], exclude)
   retrieved, votes = rank_images(descriptors, index, num_retrieved)
   log(f"Retrieved {len(retrieved)} images, votes {votes}")
 
-  dense_path = os.path.join(dataset_path, "dense")
-  dense = DenseDepth(dense_path) if use_dense and DenseDepth.available(dense_path) else None
+  dense = dataset["dense"] if use_dense else None
   if use_dense and dense is None:
     log("No dense depth maps in the dataset, only triangulated keypoints can be matched")
+  # reported as is, so the saved output tells a pose solved on triangulated points only
+  # apart from one where the fallback was asked for but had no depth maps to read
+  dense_fallback = "on" if dense is not None else ("unavailable" if use_dense else "off")
 
-  # best correspondence per query keypoint, closest descriptor wins
+  # best correspondence per query keypoint, closest descriptor wins within a source
   best = {}
   used = 0
+
+  def accumulate(queries, db, points, slots, is_sparse):
+    """Match a subset of the query against a subset of a database image, keep the best.
+
+    A triangulated point wins over a dense one whatever the descriptor distance:
+    bundle adjustment refined it against these very descriptors, while a dense point
+    only quantises a plane sweep depth map.
+    """
+    if not len(queries) or not len(slots):
+      return
+    matched, db_idx, distances = match_pair(descriptors[queries], db[slots], ratio)
+    for query, slot, distance in zip(queries[matched], slots[db_idx], distances):
+      current = best.get(query)
+      if current is None or (is_sparse, -distance) > (current[2], -current[0]):
+        best[query] = (distance, points[slot], is_sparse)
+
   for image_id in retrieved:
     # a few hundred correspondences already over determine six degrees of freedom, and
     # the retrieved images are ranked, so the tail only costs time
@@ -334,18 +427,22 @@ def localize(dataset_path, keypoints, descriptors, camera, num_retrieved=10, rat
                                           dense, names[image_id])
     if not usable.any():
       continue
-    slots = np.where(usable)[0]
-    query_idx, db_idx, distances = match_pair(descriptors, db_descriptors[image_id][usable].astype(np.float32), ratio)
+    db = db_descriptors[image_id].astype(np.float32)
     used += 1
 
-    for query, slot, distance in zip(query_idx, slots[db_idx], distances):
-      current = best.get(query)
-      if current is None or distance < current[0]:
-        best[query] = (distance, points[slot], bool(sparse[slot]))
+    # two passes, so the dense points never compete with the triangulated ones inside
+    # the ratio test: mixing both in a single pass costs real sparse matches, the dense
+    # descriptors of the same surface are close enough to fail Lowe's ratio for them
+    accumulate(np.arange(len(descriptors)), db, points, np.where(usable & sparse)[0], True)
+    if dense is not None:
+      # dense only fills the query keypoints still without a triangulated correspondence
+      pending = np.array([q for q in range(len(descriptors)) if not best.get(q, (0.0, None, False))[2]])
+      accumulate(pending, db, points, np.where(usable & ~sparse)[0], False)
 
   def failure(reason, inliers=0):
     return {"success": False, "reason": reason, "num_inliers": inliers,
-            "num_correspondences": len(best), "retrieved": [names[i] for i in retrieved]}
+            "num_correspondences": len(best), "retrieved": [names[i] for i in retrieved],
+            "dense_fallback": dense_fallback}
 
   if len(best) < 4:
     return failure(f"only {len(best)} correspondences, PnP needs at least 4")
@@ -353,9 +450,13 @@ def localize(dataset_path, keypoints, descriptors, camera, num_retrieved=10, rat
   query_idx = np.array(sorted(best))
   points2D = keypoints[query_idx, :2].astype(np.float64)
   points3D = np.array([best[i][1] for i in query_idx], np.float64)
-  from_sparse = sum(best[i][2] for i in query_idx)
-  from_dense = len(best) - from_sparse
-  log(f"{len(best)} correspondences" + (f", {from_dense} of them lifted from dense depth" if from_dense else ""))
+  # which of the two sources each correspondence fell back to, kept aligned with
+  # points2D/points3D so the inliers can be split the same way after RANSAC
+  sources = np.array([best[i][2] for i in query_idx], bool)
+  from_sparse = int(sources.sum())
+  from_dense = int(len(best) - from_sparse)
+  log(f"{len(best)} correspondences, {from_sparse} triangulated" +
+      (f", {from_dense} fell back to dense depth" if from_dense else " and none needed the dense fallback"))
 
   options = pycolmap.AbsolutePoseEstimationOptions()
   options.ransac.max_error = max_error
@@ -375,6 +476,14 @@ def localize(dataset_path, keypoints, descriptors, camera, num_retrieved=10, rat
     return failure(f"{int(inliers.sum())} inliers out of {len(best)} correspondences, "
                    f"under the {min_inliers} needed to trust a pose", int(inliers.sum()))
 
+  # the correspondence counts say what was available, the inlier counts say what the
+  # pose actually rests on: a query can retrieve hundreds of dense points and still be
+  # solved entirely by the triangulated ones
+  sparse_inliers = int((sources & inliers).sum())
+  dense_inliers = int((~sources & inliers).sum())
+  log(f"Pose from {sparse_inliers} triangulated inliers" +
+      (f" and {dense_inliers} lifted from dense depth" if dense_inliers else ", no dense fallback used"))
+
   projected = camera.img_from_cam(cam_from_world * points3D[inliers])
   residuals = np.linalg.norm(np.asarray(projected) - points2D[inliers], axis=1)
   return {
@@ -384,6 +493,10 @@ def localize(dataset_path, keypoints, descriptors, camera, num_retrieved=10, rat
     "num_correspondences": len(best),
     "num_sparse_correspondences": int(from_sparse),
     "num_dense_correspondences": int(from_dense),
+    "num_sparse_inliers": sparse_inliers,
+    "num_dense_inliers": dense_inliers,
+    "point_source": "sparse" if not dense_inliers else "sparse+dense",
+    "dense_fallback": dense_fallback,
     "inlier_ratio": float(inliers.mean()),
     "reprojection_error": float(residuals.mean()),
     "retrieved": [names[i] for i in retrieved],
