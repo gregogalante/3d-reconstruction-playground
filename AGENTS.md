@@ -59,7 +59,9 @@ python server.py
   cached `.splat` files after touching the conversion, the cache only tracks the PLY
   timestamp.
 - `storage/datasets/<name>/` — `train/` (input photos), `images/` (resized),
-  `database.db`, `sfm/`, `dense/`, `splat/`, `config.json`. Git-ignored.
+  `database.db`, `sfm/`, `dense/`, `splat/`, `config.json` (the constants and CLI
+  options of the run), `time.json` (seconds per step, rewritten every run: a step whose
+  output was already on disk reads as ~0). Git-ignored.
 
 ## Video input
 
@@ -177,6 +179,10 @@ image dataset, so there is no pipeline artifact to keep in sync.
    every correct match. Only a ranking is needed, so 4000 query descriptors are enough.
 2. **Match** the query against the top images one by one, mutual nearest neighbours
    plus ratio test. Database keypoints without a 3D point are dropped before matching.
+   With `--dense` the image is matched twice: the triangulated keypoints first, then
+   the dense lifted ones against the query keypoints still without a correspondence.
+   The two passes are what makes dense a fallback instead of a competitor — see the
+   dead end below.
 3. **Solve** PnP with LO-RANSAC at 4 px, then refine pose *and* intrinsics.
 4. **Report** inliers, mean reprojection error and a two panel `_overlay.jpg`: the
    query on the left, the model reprojected from the estimated pose on the right, and
@@ -219,6 +225,27 @@ What actually mattered, measured against the table in [README.md](README.md):
   0.33% of radius against 0.23% without, `over-office-1` 0.02% against 0.04%, at 1.5x
   the matching cost. The MVS depths are simply less accurate than the triangulated
   points. Kept as a flag, off by default.
+
+  Mixing both sources in one matching pass also *costs* triangulated correspondences:
+  the dense descriptors of a surface sit next to the triangulated ones, so each kills
+  the other's ratio test and mutual check. Measured on three `south-building` queries,
+  one pass dropped 5.6 to 7.2% of the sparse correspondences (1647 → 1529, 1658 →
+  1547, 3441 → 3247). Hence the two passes, plus a triangulated point winning any dense
+  one on the same query keypoint whatever the descriptor distance: `--dense` now leaves
+  the sparse correspondences and inliers bit for bit identical to a sparse only run and
+  only adds on top.
+
+  What that buys, precisely: on those queries the pose comes out the same either way,
+  one pass or two, to well under a millimetre. The two passes are a guarantee that the
+  fallback cannot subtract from the sparse solution, not a measured accuracy gain — and
+  the queries were dataset images, the easiest case there is. Re-measure on a query
+  from outside the dataset before claiming more.
+
+  The saved JSON says which source the pose rests on: `dense_fallback`
+  (`off` | `unavailable` | `on`), `num_sparse_inliers` and `num_dense_inliers` next to
+  the correspondence counts, and `point_source` (`sparse` | `sparse+dense`). Compare
+  `inlier_ratio` and `reprojection_error` only between runs with the same
+  `dense_fallback`: the dense points change the population they average over.
 - **The gaussians have nothing to offer here.** Photometric refinement against a render
   would need the torch subprocess and a differentiable pose, to improve on a PnP that
   already lands within 0.03% of the scene radius and 0.02 degrees.

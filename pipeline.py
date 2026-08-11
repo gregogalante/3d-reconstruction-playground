@@ -431,8 +431,28 @@ def main():
     print_error(f"Dataset path {dataset_path} does not exist.")
     sys.exit(1)
 
+  # the whole configuration of the run, so a dataset can be read back (relocation.py
+  # needs image_max_dimension) and a reconstruction traced to the settings that made it
   config_path = os.path.join(dataset_path, 'config.json')
-  config = {"image_max_dimension": IMAGE_MAX_DIMENSION, "image_max_items": IMAGE_MAX_ITEMS}
+  config = {
+    "image_max_dimension": IMAGE_MAX_DIMENSION,
+    "image_max_items": IMAGE_MAX_ITEMS,
+    "image_extensions": list(IMAGE_EXTENSIONS),
+    "video_extensions": list(VIDEO_EXTENSIONS),
+    "dense_min_num_pixels": DENSE_MIN_NUM_PIXELS,
+    "dense_max_normal_error": DENSE_MAX_NORMAL_ERROR,
+    "dense_max_size": args.dense_max_size,
+    "dense_num_src": args.dense_num_src,
+    "dense_num_samples": args.dense_num_samples,
+    "dense_num_workers": args.dense_num_workers,
+    "splat_iterations": args.splat_iterations,
+    "splat_max_size": args.splat_max_size,
+    "splat_max_gaussians": args.splat_max_gaussians,
+    "splat_capacity": args.splat_capacity,
+    "splat_warmup": args.splat_warmup,
+    "splat_holdout": args.splat_holdout,
+    "splat_device": args.splat_device,
+  }
   with open(config_path, 'w') as f:
     json.dump(config, f, indent=2)
   print_info(f"Config saved to {config_path}")
@@ -449,34 +469,38 @@ def main():
     if os.path.exists(splat_path):
       shutil.rmtree(splat_path)
 
+  steps = [
+    ("Build Images", lambda: build_images(train_path, images_path)),
+    ("Extract Features", lambda: extract_features(database_path, images_path)),
+    ("Match Features", lambda: match_features(database_path)),
+    ("Build SFM Reconstruction", lambda: build_sfm_reconstruction(database_path, images_path, sfm_path)),
+    ("Build SFM Reconstruction PLY", lambda: build_sfm_reconstruction_ply(sfm_path)),
+    ("Build SFM Reconstruction TXT", lambda: build_sfm_reconstruction_txt(sfm_path)),
+    ("Build SFM Reconstruction transforms.json", lambda: build_sfm_reconstruction_transforms_json(images_path, sfm_path)),
+    ("Build Dense Workspace", lambda: build_dense_workspace(sfm_path, images_path, dense_path)),
+    ("Build Dense Depth Maps", lambda: build_dense_depth_maps(dense_path, args.dense_max_size, args.dense_num_src, args.dense_num_samples, args.dense_num_workers)),
+    ("Build Dense Point Cloud", lambda: build_dense_point_cloud(dense_path)),
+    # ("Build Gaussian Splat", lambda: build_splat(dataset_path, args)),
+  ]
+
   time_start = time.time()
-  print_step("🚀 Build Images")
-  build_images(train_path, images_path)
-  print_step("🚀 Extract Features")
-  extract_features(database_path, images_path)
-  print_step("🚀 Match Features")
-  match_features(database_path)
-  print_step("🚀 Build SFM Reconstruction")
-  build_sfm_reconstruction(database_path, images_path, sfm_path)
-  print_step("🚀 Build SFM Reconstruction PLY")
-  build_sfm_reconstruction_ply(sfm_path)
-  print_step("🚀 Build SFM Reconstruction TXT")
-  build_sfm_reconstruction_txt(sfm_path)
-  print_step("🚀 Build SFM Reconstruction transforms.json")
-  build_sfm_reconstruction_transforms_json(images_path, sfm_path)
-  print_step("🚀 Build Dense Workspace")
-  build_dense_workspace(sfm_path, images_path, dense_path)
-  print_step("🚀 Build Dense Depth Maps")
-  build_dense_depth_maps(dense_path, args.dense_max_size, args.dense_num_src, args.dense_num_samples, args.dense_num_workers)
-  print_step("🚀 Build Dense Point Cloud")
-  build_dense_point_cloud(dense_path)
-  print_step("🚀 Build Gaussian Splat")
-  build_splat(dataset_path, args)
+  timings = {}
+  for label, step in steps:
+    print_step(f"🚀 {label}")
+    step_start = time.time()
+    step()
+    timings[label] = round(time.time() - step_start, 2)
 
   print_step("✅ Pipeline completed")
-  time_end = time.time()
-  time_total = time_end - time_start
+  time_total = time.time() - time_start
   print_success(f"Total execution time: {time_total:.2f} seconds")
+
+  # a step that found its output already on disk costs nothing, so the report only
+  # measures what this run actually rebuilt
+  time_path = os.path.join(dataset_path, 'time.json')
+  with open(time_path, 'w') as f:
+    json.dump({"steps": timings, "total": round(time_total, 2)}, f, indent=2)
+  print_info(f"Time report saved to {time_path}")
 
 if __name__ == "__main__":
   main()
