@@ -17,6 +17,9 @@ therefore as trusted with no certificate at all.
 
 Deliberately free of pycolmap and torch: this process only writes files, and staying out
 of their way keeps it starting instantly and running next to a pipeline that is busy.
+
+The other half of the pair is `viewer_server.py` with `viewer/`, which shows what the
+dataset became. Same naming both times: `<name>_server.py` serves `<name>/`.
 """
 
 import io

@@ -22,11 +22,17 @@ relocalisation against a reconstruction, served to a small web UI.
 ```bash
 python pipeline.py --dataset storage/datasets/home --reset   # sfm + dense + splat
 python relocation.py --dataset storage/datasets/home --image storage/inputs/relocation_home.jpg --output storage/relocations/home
-python server.py            # the viewer, http://localhost:8000
+python viewer_server.py     # the viewer, http://localhost:8000
 python capture_server.py    # capture from a phone, https://<lan-ip>:8443
 ```
 
 ## Layout
+
+Two servers, each with the page it serves, named the same way both times:
+`<name>_server.py` serves `<name>/`. `capture_server.py` + `capture/` make datasets,
+`viewer_server.py` + `viewer/` show them. Everything they share sits in `libs/`, and
+`pipeline.py` is what runs between the two.
+
 
 - `pipeline.py` — SfM + dense pipeline, one function per step, all steps skip work
   that already exists on disk (`--reset` to rebuild). Two constants at the top:
@@ -41,20 +47,22 @@ python capture_server.py    # capture from a phone, https://<lan-ip>:8443
 - `libs/splat_trainer.py` — runnable trainer (`python -m libs.splat_trainer`), launched
   by the pipeline's splat step. See below.
 - `libs/console.py` — the coloured `print_*` helpers shared with the subprocess.
-- `libs/ply.py` — numpy PLY vertex I/O, torch free so `server.py` can use it too.
+- `libs/ply.py` — numpy PLY vertex I/O, torch free so `viewer_server.py` can use it too.
 - `libs/read_write_model.py` — COLMAP model text/binary I/O (upstream script).
 - `libs/colmap2nerf.py` — COLMAP model to `transforms.json` (upstream instant-ngp
   script, kept as is). Run as `python -m libs.colmap2nerf`: it has no main guard, so
   importing it would execute it.
-- `capture_server.py` + `capture/` — the phone capture server and its page (see below).
-  Free of pycolmap and torch on purpose: it only writes files, and stays startable while
-  a pipeline is busy. `capture/lib/` is plain ES modules, JavaScript Standard Style, and
-  the guidance in it is the one part with tests (`node --test 'capture/lib/*.test.js'`).
+- `capture_server.py` + `capture/` — where a dataset comes from: the phone capture server
+  and its page (see below). Free of pycolmap and torch on purpose, it only writes files
+  and stays startable while a pipeline is busy. `capture/lib/` is plain ES modules,
+  JavaScript Standard Style, and the guidance in it is the one part of the repo with
+  tests (`node --test 'capture/lib/*.test.js'`).
 - `relocation.py` — localise a query image against an existing reconstruction (see below).
 - `libs/localizer.py` — the retrieval, matching and PnP behind it.
 - `libs/evaluation.py` — leave one out relocalisation over a dataset's own images, run
   as the last pipeline step and written to `relocation.json` (see below).
-- `server.py` + `ui/` — FastAPI backend and viewer. `/api/datasets/<name>/clouds`
+- `viewer_server.py` + `viewer/` — where a dataset ends up: FastAPI backend and the React
+  viewer it serves out of `viewer/dist`. `/api/datasets/<name>/clouds`
   reports which of the sparse, dense and splat clouds exist, the UI lets you switch
   between them and greys out the missing ones. The gaussians are served as
   `/splat.splat` (the 32 byte per gaussian layout the web renderer reads), converted
@@ -400,7 +408,7 @@ gives 5 inliers out of 97 and used to be stored as a success.
 `POST /api/datasets/<name>/relocate`, which the viewer's "Locate a photo" button posts
 an upload to. The endpoint writes into `storage/relocations/<dataset>/` exactly like
 the CLI, deletes what it wrote when the pose is rejected, and answers 422 with the
-reason. Importing `relocation` from `server.py` is safe, neither pulls in torch.
+reason. Importing `relocation` from `viewer_server.py` is safe, neither pulls in torch.
 
 What actually mattered, measured against the table in [README.md](README.md):
 

@@ -7,6 +7,14 @@ python pipeline.py --dataset storage/datasets/banana --reset
 python relocation.py --dataset storage/datasets/banana --image storage/inputs/relocation_banana.jpg --output storage/relocations/banana
 ```
 
+Two servers bracket the pipeline, each with the page it serves — `<name>_server.py`
+serves `<name>/`:
+
+```bash
+python capture_server.py    # capture/ — a phone fills storage/datasets/<name>/train/
+python viewer_server.py     # viewer/  — what the pipeline made of it, in a browser
+```
+
 `IMAGE_MAX_ITEMS` in [pipeline.py](pipeline.py) caps how many photos of `train/` are
 used, 300 by default. Matching is quadratic in their number, so a denser capture costs
 much more than it adds; over the cap the photos are decimated uniformly (400 capped at

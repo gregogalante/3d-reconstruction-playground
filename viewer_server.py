@@ -1,3 +1,13 @@
+"""Viewer server: what a dataset became, in a browser.
+
+Serves the reconstructions out of `storage/datasets/` — the sparse, dense and splat point
+clouds, the camera frustums, the images behind them and the relocalisations — to the
+React app in `viewer/`, and takes photo uploads to localise against a model.
+
+The other half of the pair is `capture_server.py` with `capture/`, which is where a
+dataset comes from. Same naming both times: `<name>_server.py` serves `<name>/`.
+"""
+
 import re
 import math
 import json
@@ -264,9 +274,9 @@ def get_relocation_overlay(folder: str, name: str):
     return FileResponse(path, media_type="image/jpeg")
 
 
-UI_DIST = Path(__file__).parent / "ui" / "dist"
-if UI_DIST.exists():
-    app.mount("/", StaticFiles(directory=str(UI_DIST), html=True), name="ui")
+VIEWER_UI = Path(__file__).parent / "viewer" / "dist"
+if VIEWER_UI.exists():
+    app.mount("/", StaticFiles(directory=str(VIEWER_UI), html=True), name="viewer")
 
 
 if __name__ == "__main__":
