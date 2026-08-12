@@ -11,20 +11,40 @@
 import { sub, add, scale, dot, cross, distance, normalize, length, angleBetween } from './vec.js'
 
 export const ORBIT = {
-  angularStep: 12, // degrees around the subject between two shots
   targetTolerance: 18, // how close a shot has to pass for a guidance target to count
   offAxisLimit: 38, // degrees the subject may sit off the middle of the frame
   minRadiusRatio: 0.55, // fraction of the set radius before you are too close
   maxRadiusRatio: 2.2,
-  minSeconds: 0.4
+  minSeconds: 0.3
 }
 
 export const WALK = {
-  baseline: 0.3, // metres of travel that earn a shot
-  rotationBaseline: 25, // degrees of turn that also earn one...
-  rotationMinTravel: 0.1, // ...as long as you moved at least this far while turning
   spinTravel: 0.12, // turning this much without moving is the panorama failure
-  minSeconds: 0.6
+  minSeconds: 0.2 // only there to stop one motion producing two identical frames
+}
+
+// How much of the lens two neighbouring shots have to share. Dense matching wants
+// something like three quarters, so the turn between them is capped at a quarter of the
+// field of view.
+const OVERLAP_TURN = 0.25
+// And the sideways step is capped against how far the subject is: the old photogrammetry
+// guideline of a baseline no longer than an eighth of the depth.
+const BASELINE_TO_DEPTH = 8
+const DEFAULT_FOV = 60
+const DEFAULT_DEPTH = 1.5
+
+const clamp = (value, low, high) => Math.min(high, Math.max(low, value))
+
+// The thresholds are not constants because the lens is not one. A phone in portrait sees
+// 34 degrees across, where a fixed 25 degree rule leaves a quarter of the frame shared —
+// measured on a real capture, 35 of 67 neighbouring pairs turned more than half the lens
+// and 7 shared nothing at all, and COLMAP registered 16 of 68 frames.
+export function limitsFor ({ fov = DEFAULT_FOV, depth = null } = {}) {
+  return {
+    turn: clamp(fov * OVERLAP_TURN, 4, 15),
+    baseline: clamp((depth || DEFAULT_DEPTH) / BASELINE_TO_DEPTH, 0.06, 0.5),
+    fov
+  }
 }
 
 const UP = [0, 1, 0]
@@ -82,6 +102,9 @@ function orbitAdvice (state) {
   const { plan, viewer, shots, seconds } = state
   const toCentre = sub(plan.centre, viewer.position)
   const radius = length(toCentre)
+  // walking a step around the subject turns the camera by the same angle, so the orbit
+  // step is the overlap limit and nothing else
+  const limits = limitsFor({ fov: state.fov, depth: radius })
   const direction = directionFromCentre(plan, viewer.position)
   const offAxis = angleBetween(viewer.forward, toCentre)
 
@@ -102,6 +125,7 @@ function orbitAdvice (state) {
   const advice = {
     capture: false,
     cue: 'walk',
+    limits,
     progress: covered.filter(Boolean).length / plan.targets.length,
     target,
     arrow: relative ? { angle: Math.atan2(relative.lateral, relative.ahead) * 180 / Math.PI, behind: relative.ahead < 0 } : null,
@@ -129,11 +153,11 @@ function orbitAdvice (state) {
   if (!target) {
     advice.cue = 'complete'
     advice.text = 'Every angle covered. Finish, or keep filling in.'
-    advice.capture = separation >= ORBIT.angularStep && seconds >= ORBIT.minSeconds
+    advice.capture = separation >= limits.turn && seconds >= ORBIT.minSeconds
     return advice
   }
 
-  if (separation >= ORBIT.angularStep && seconds >= ORBIT.minSeconds) {
+  if (separation >= limits.turn && seconds >= ORBIT.minSeconds) {
     advice.capture = true
     advice.cue = 'walk'
     advice.text = 'Keep walking around it'
@@ -155,30 +179,34 @@ function orbitAdvice (state) {
 
 function walkAdvice (state) {
   const { viewer, shots, seconds } = state
+  const limits = limitsFor({ fov: state.fov, depth: state.depth })
   if (!shots.length) {
-    return { capture: seconds >= WALK.minSeconds, cue: 'start', progress: 0, text: 'Start walking', warning: null, arrow: null, target: null }
+    return { capture: seconds >= WALK.minSeconds, cue: 'start', progress: 0, text: 'Start walking', warning: null, arrow: null, target: null, limits }
   }
 
   const last = shots[shots.length - 1]
   const travel = distance(viewer.position, last.position)
   const turn = angleBetween(viewer.forward, last.forward)
-  const advice = { capture: false, cue: 'walk', progress: 0, target: null, arrow: null, text: '', warning: null, distance: travel }
+  const advice = { capture: false, cue: 'walk', progress: 0, target: null, arrow: null, text: '', warning: null, distance: travel, limits }
 
   // Turning a lot from a spot you have not left is exactly how you end up with a
   // panorama, which is the one capture no amount of matching can rescue.
-  if (turn >= WALK.rotationBaseline && travel < WALK.spinTravel) {
+  if (turn >= limits.turn && travel < WALK.spinTravel) {
     advice.warning = 'You are turning on the spot — walk sideways instead'
     advice.cue = 'spin'
   }
 
-  const earned = travel >= WALK.baseline || (turn >= WALK.rotationBaseline && travel >= WALK.rotationMinTravel)
-  if (earned && seconds >= WALK.minSeconds) {
+  // A turn earns a shot on its own, with no distance asked for. Refusing one because the
+  // person had not also walked is what tore the first real capture apart: they swung the
+  // phone through 60 degrees, nothing was taken, and the frames either side of the swing
+  // had nothing in common for COLMAP to join them by.
+  if ((travel >= limits.baseline || turn >= limits.turn) && seconds >= WALK.minSeconds) {
     advice.capture = true
     advice.text = 'Keep going'
     return advice
   }
 
-  const left = Math.max(0, WALK.baseline - travel)
+  const left = Math.max(0, limits.baseline - travel)
   advice.text = `Walk ${Math.round(left * 100)} cm more`
   return advice
 }
@@ -187,6 +215,7 @@ export function advise (state) {
   if (state.mode === 'orbit') {
     return state.plan ? orbitAdvice(state) : {
       capture: false, cue: 'subject', progress: 0, target: null, arrow: null, warning: null,
+      limits: limitsFor({ fov: state.fov }),
       text: 'Point at the middle of your subject and set it'
     }
   }

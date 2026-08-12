@@ -25,6 +25,9 @@ const RELATIVE_SHARPNESS = 0.55
 const SHARPNESS_MEMORY = 12
 // How long a JPEG encode is given before the frame is written off, see `shoot`.
 const ENCODE_TIMEOUT = 2500
+// Corners per frame under which a scene has nothing for the matcher. The server's own
+// number, kept here to decide when to say so; see FEATURES_STARVED in capture_server.py.
+const FEATURES_STARVED = 750
 
 const state = {
   mode: 'orbit',
@@ -43,7 +46,9 @@ const state = {
   interval: null,
   milestone: 0,
   spokenCue: null,
-  spokenAt: 0
+  spokenAt: 0,
+  fov: null,
+  features: []
 }
 
 const scratch = el('scratch')
@@ -243,6 +248,22 @@ function buzz (pattern) {
   if (navigator.vibrate) navigator.vibrate(pattern)
 }
 
+// The other way a frame is useless, and the one nothing on the phone can see: a white
+// wall is in perfect focus and has nothing to match. The server counts the corners it
+// finds and this says so out loud, once, while there is still time to aim elsewhere.
+function noteTexture (count) {
+  if (typeof count !== 'number') return
+  state.features.push(count)
+  if (state.features.length > SHARPNESS_MEMORY) state.features.shift()
+  if (state.features.length < 5 || state.texturedWarned) return
+
+  const sorted = [...state.features].sort((a, b) => a - b)
+  if (sorted[Math.floor(sorted.length / 2)] >= FEATURES_STARVED) return
+  state.texturedWarned = true
+  flash('Almost nothing to match here — take in more of the room')
+  say('almost nothing to match here, take in more of the room', { force: true })
+}
+
 // ----------------------------------------------------------------------------
 // GUIDED SESSION
 // ----------------------------------------------------------------------------
@@ -271,14 +292,23 @@ async function runGuided () {
     state.viewer = viewer
     state.pose = pose
 
-    // The hit test is only read while the subject is still unset: afterwards the plan is
-    // fixed, and a plan that drifted with the floor under it would move the targets.
-    if (state.mode === 'orbit' && !state.plan) {
+    // The hit test keeps running in walk mode: how far the wall in front is decides how
+    // far a step may be, and a step measured in metres means nothing without it.
+    if (state.mode === 'walk' || !state.plan) {
       state.hit = session.hitDistance ? session.hitDistance(frame) : null
+    }
+    if (state.mode === 'orbit' && !state.plan) {
       const prompt = el('subject-prompt').querySelector('p')
       prompt.textContent = state.hit
         ? `Subject ${distanceTo(state.hit.position, viewer.position)} away. Set it and start orbiting.`
         : 'Point at the middle of your subject from where you want to orbit, then set it.'
+    }
+
+    // The lens is the thing the overlap rule is written against, and only the session
+    // knows how wide it is: a phone in portrait sees a third of what a guess assumes.
+    if (state.fov == null && session.intrinsics) {
+      const intrinsics = session.intrinsics()
+      if (intrinsics) state.fov = 2 * Math.atan(intrinsics.width / (2 * intrinsics.fx)) * 180 / Math.PI
     }
 
     const advice = advise({
@@ -286,6 +316,8 @@ async function runGuided () {
       plan: state.plan,
       viewer,
       shots: state.shots,
+      fov: state.fov,
+      depth: state.hit ? Math.hypot(...state.hit.position.map((value, axis) => value - viewer.position[axis])) : null,
       seconds: (window.performance.now() - state.lastCapture) / 1000
     })
     paint(advice, session)
@@ -306,6 +338,7 @@ function meta (session, advice) {
   return {
     tracking: SIMULATE ? 'simulated' : 'webxr',
     pose: state.pose,
+    fov: state.fov,
     intrinsics: session.intrinsics ? session.intrinsics() : null,
     target: advice && advice.target ? { azimuth: advice.target.azimuth, elevation: advice.target.elevation } : null
   }
@@ -442,7 +475,8 @@ async function start () {
         const queue = el('hud-queue')
         queue.hidden = counts.pending === 0 && counts.failed === 0
         queue.textContent = counts.failed ? `${counts.pending}↑ ${counts.failed}✗` : `${counts.pending}↑`
-      }
+      },
+      onStored: stored => noteTexture(stored.features)
     })
     el('hud-dataset').textContent = state.server.dataset
     keepAwake()
@@ -533,7 +567,11 @@ async function finish ({ ended = false, forced = false } = {}) {
   await state.uploader.drain()
   const summary = await api.finishSession(server.session)
 
-  el('summary-verdict').textContent = verdict(summary.frames)
+  // the server has the poses and the frames, so its reading beats the one the phone can
+  // make from shot count alone
+  el('summary-verdict').textContent = summary.diagnosis && summary.diagnosis.verdict
+    ? summary.diagnosis.verdict
+    : verdict(summary.frames)
 
   const stats = el('summary-stats')
   stats.innerHTML = ''
@@ -544,7 +582,8 @@ async function finish ({ ended = false, forced = false } = {}) {
     ['Rejected as blurry', state.rejected],
     ['Failed to upload', counts.failed],
     ['Sharpness, median', summary.sharpness.median ?? '—'],
-    ['Sharpness, worst', summary.sharpness.worst ?? '—']
+    ['Texture, median corners', summary.diagnosis?.features?.median ?? '—'],
+    ['Frames sharing no view', summary.diagnosis?.turns?.sharing_nothing ?? '—']
   ]
   for (const [name, value] of rows) {
     const term = document.createElement('dt')

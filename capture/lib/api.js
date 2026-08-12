@@ -30,7 +30,7 @@ export async function undoLast (id) {
   return response.json()
 }
 
-export function createUploader (id, { onChange = () => {} } = {}) {
+export function createUploader (id, { onChange = () => {}, onStored = () => {} } = {}) {
   const queue = []
   let running = false
   let uploaded = 0
@@ -53,7 +53,9 @@ export function createUploader (id, { onChange = () => {} } = {}) {
     while (queue.length) {
       const item = queue[0]
       try {
-        await send(item)
+        // the server measures the frame properly on arrival, and what it finds is worth
+        // hearing about while there is still time to point the camera somewhere else
+        onStored(await send(item))
         uploaded++
       } catch {
         // One retry, then the frame is dropped and counted: a capture that stalls on a

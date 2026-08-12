@@ -48,6 +48,17 @@ MAX_FRAME_BYTES = 12 * 1024 * 1024
 # and picks holdouts on the sorted names, and a capture is meaningful in order.
 FRAME_NAME = "capture_{:05d}.jpg"
 
+# Under this many corners on a 320 px copy, a frame has almost nothing for the matcher to
+# hold on to. Calibrated against a real capture: the frames COLMAP found fewer than 500
+# keypoints on scored a median of 180 here, the rest 487.
+FEATURES_FLOOR = 250
+# And a whole capture is starved below this. Measured across three datasets: a stone
+# facade that reconstructs gives a median of 2846 corners a frame, a fruit on a table
+# 1694, and a white freezer against white walls — which COLMAP registered 16 frames of
+# out of 68 — only 254.
+FEATURES_STARVED = 750
+FAST = cv2.FastFeatureDetector_create(threshold=20)
+
 # WebXR hands out poses in its own frame, and nothing downstream reads them back blindly:
 # this line is what a later conversion has to be written against.
 CONVENTION = ("WebXR world-from-camera in the session reference space: right handed, "
@@ -152,10 +163,26 @@ def train_photos(dataset):
                   if path.suffix.lower() in (".jpg", ".jpeg", ".png"))
 
 
-def sharpness(image):
-    """Variance of the Laplacian, the same blur measure `pipeline.py` uses on frames."""
+def thumbnail(image):
+    """The small grey copy both measures below are taken on."""
     small = cv2.resize(image, (320, round(320 * image.shape[0] / image.shape[1])))
-    return float(cv2.Laplacian(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY), cv2.CV_32F).var())
+    return cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+
+
+def sharpness(grey):
+    """Variance of the Laplacian, the same blur measure `pipeline.py` uses on frames."""
+    return float(cv2.Laplacian(grey, cv2.CV_32F).var())
+
+
+def features(grey):
+    """Corners in the frame, as a stand in for what SIFT will find in it later.
+
+    Blur is not the only way a frame can be useless: a white wall is perfectly sharp and
+    has nothing to match. Measured against a real capture of a white freezer in a white
+    corner, this count tracks COLMAP's own keypoint count at 0.83 and costs 7 ms, where
+    the Laplacian variance — which confuses flat with blurred — manages 0.70.
+    """
+    return len(FAST.detect(grey))
 
 
 def next_index(dataset_path):
@@ -293,6 +320,7 @@ async def upload_frame(session_id: str, frame: UploadFile = File(...), meta: str
 
     # numbered against the folder, not against this session: two phones can be filling
     # the same dataset, and a second pass must not land on the first pass's frames
+    grey = thumbnail(decoded)
     index = next_index(session["path"])
     while (session["path"] / "train" / FRAME_NAME.format(index)).exists():
         index += 1
@@ -311,14 +339,17 @@ async def upload_frame(session_id: str, frame: UploadFile = File(...), meta: str
         "bytes": len(payload),
         # measured here as well as on the phone: the client score decides whether a frame
         # is worth uploading, this one is the number the dataset is judged on later
-        "sharpness": round(sharpness(decoded), 1),
+        "sharpness": round(sharpness(grey), 1),
+        # what the matcher will have to work with, see `features`
+        "features": features(grey),
         "captured": datetime.datetime.now().isoformat(timespec="milliseconds"),
     }
     record.update({key: value for key, value in metadata.items() if key not in record})
     session["frames"].append(record)
     write_manifest(session)
 
-    return {"index": index, "total": len(session["frames"]), "sharpness": record["sharpness"]}
+    return {"index": index, "total": len(session["frames"]),
+            "sharpness": record["sharpness"], "features": record["features"]}
 
 
 @app.delete("/api/capture/sessions/{session_id}/frames/last")
@@ -336,6 +367,62 @@ def drop_last_frame(session_id: str):
     return {"dropped": dropped["file"], "total": len(session["frames"])}
 
 
+def viewing_directions(frames):
+    """Where each frame was looking, from the WebXR quaternions it carries."""
+    directions = []
+    for frame in frames:
+        pose = frame.get("pose") or {}
+        q = pose.get("orientation")
+        if not q:
+            continue
+        v = np.array([0.0, 0.0, -1.0])
+        qv = np.array([q["x"], q["y"], q["z"]])
+        directions.append(v + 2 * np.cross(qv, np.cross(qv, v) + q["w"] * v))
+    return np.array(directions)
+
+
+def diagnose(frames):
+    """Why this capture will or will not reconstruct, from the poses and the frames.
+
+    Two neighbouring shots have to see some of the same thing. The poses say how far the
+    camera swung between them and the intrinsics say how much it can see at once, so the
+    pairs that share nothing are countable here rather than an hour later, when COLMAP
+    reports the model in pieces.
+    """
+    if len(frames) < 2:
+        return {"verdict": "too few frames to say anything"}
+
+    intrinsics = next((frame.get("intrinsics") for frame in frames if frame.get("intrinsics")), None)
+    fov = (2 * np.degrees(np.arctan(intrinsics["width"] / (2 * intrinsics["fx"])))
+           if intrinsics else None)
+
+    report = {"fov": round(float(fov), 1) if fov else None}
+    counts = [frame.get("features", 0) for frame in frames]
+    report["features"] = {"median": int(np.median(counts)),
+                          "starved": int(sum(count < FEATURES_FLOOR for count in counts))}
+
+    directions = viewing_directions(frames)
+    if fov and len(directions) > 1:
+        cosines = np.clip(np.sum(directions[1:] * directions[:-1], axis=1), -1, 1)
+        turns = np.degrees(np.arccos(cosines))
+        report["turns"] = {"median": round(float(np.median(turns)), 1),
+                           "max": round(float(turns.max()), 1),
+                           "past_half_the_lens": int((turns > fov * 0.5).sum()),
+                           "sharing_nothing": int((turns > fov).sum())}
+
+    problems = []
+    broken = report.get("turns", {}).get("sharing_nothing")
+    if broken:
+        problems.append(f"{broken} pair{'s' if broken > 1 else ''} of neighbouring frames "
+                        f"share no view at all, the model will break there")
+    if report["features"]["median"] < FEATURES_STARVED:
+        problems.append(f"the scene is short of texture ({report['features']['median']} corners a "
+                        f"frame, against 1700 to 2800 on captures that reconstruct): blank walls "
+                        f"and plain surfaces give a matcher nothing to hold")
+    report["verdict"] = "; ".join(problems) if problems else "nothing obviously wrong with it"
+    return report
+
+
 @app.post("/api/capture/sessions/{session_id}/finish")
 def finish_session(session_id: str):
     """Close the capture and hand back the command that turns it into a reconstruction."""
@@ -344,6 +431,7 @@ def finish_session(session_id: str):
         raise HTTPException(404, "Unknown capture session")
 
     session["finished"] = datetime.datetime.now().isoformat(timespec="seconds")
+    session["diagnosis"] = diagnose(session["frames"])
     write_manifest(session)
 
     frames = session["frames"]
@@ -353,6 +441,7 @@ def finish_session(session_id: str):
         "frames": len(frames),
         "sharpness": {"median": round(float(np.median(sharp)), 1) if sharp else None,
                       "worst": round(float(np.min(sharp)), 1) if sharp else None},
+        "diagnosis": session["diagnosis"],
         "manifest": str(session["path"] / "capture.json"),
         "command": f"python pipeline.py --dataset storage/datasets/{session['dataset']} --reset",
     }

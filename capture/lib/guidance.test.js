@@ -7,7 +7,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { planOrbit, advise, recordShot, coveredTargets, ORBIT, WALK } from './guidance.js'
+import { planOrbit, advise, recordShot, coveredTargets, limitsFor } from './guidance.js'
 import { angleBetween, distance } from './vec.js'
 
 const viewerAt = (position, lookingAt = [0, 0, 0]) => {
@@ -48,10 +48,11 @@ test('a shot is earned by moving around the subject, not by standing still', () 
   const standing = advise({ mode: 'orbit', plan, viewer: onOrbit(plan, 0), shots, seconds: 5 })
   assert.equal(standing.capture, false, 'the same spot is the same shot')
 
-  const nudged = advise({ mode: 'orbit', plan, viewer: onOrbit(plan, ORBIT.angularStep - 3), shots, seconds: 5 })
+  const step = limitsFor({ depth: 1.6 }).turn
+  const nudged = advise({ mode: 'orbit', plan, viewer: onOrbit(plan, step - 3), shots, seconds: 5 })
   assert.equal(nudged.capture, false, 'half a step is not a new viewpoint')
 
-  const moved = advise({ mode: 'orbit', plan, viewer: onOrbit(plan, ORBIT.angularStep + 2), shots, seconds: 5 })
+  const moved = advise({ mode: 'orbit', plan, viewer: onOrbit(plan, step + 2), shots, seconds: 5 })
   assert.equal(moved.capture, true)
 })
 
@@ -116,25 +117,39 @@ test('the arrow and the words agree on which way to walk', () => {
   if (/left/.test(advice.text)) assert.ok(advice.arrow.angle < 0, 'left means anticlockwise on screen')
 })
 
-test('walking earns a shot by distance, and turning on the spot earns a warning', () => {
+test('walking earns a shot by distance, and turning earns one on its own', () => {
   const shots = [{ position: [0, 1.5, 0], forward: [0, 0, -1], direction: [0, 0, -1] }]
+  const limits = limitsFor({ fov: 34, depth: 1.5 })
 
-  const still = advise({ mode: 'walk', viewer: viewerAt([0.05, 1.5, 0], [0.05, 1.5, -1]), shots, seconds: 5 })
+  const still = advise({ mode: 'walk', fov: 34, depth: 1.5, viewer: viewerAt([0.02, 1.5, 0], [0.02, 1.5, -1]), shots, seconds: 5 })
   assert.equal(still.capture, false)
   assert.match(still.text, /cm more/)
 
-  const walked = advise({ mode: 'walk', viewer: viewerAt([WALK.baseline + 0.05, 1.5, 0], [WALK.baseline + 0.05, 1.5, -1]), shots, seconds: 5 })
+  const walked = advise({ mode: 'walk', fov: 34, depth: 1.5, viewer: viewerAt([limits.baseline + 0.02, 1.5, 0], [limits.baseline + 0.02, 1.5, -1]), shots, seconds: 5 })
   assert.equal(walked.capture, true)
 
-  // turned 90 degrees from the same spot: the panorama that no matcher can rescue
-  const spun = advise({ mode: 'walk', viewer: { position: [0.02, 1.5, 0], forward: [1, 0, 0] }, shots, seconds: 5 })
-  assert.equal(spun.capture, false)
-  assert.match(spun.warning, /turning on the spot/i)
+  // A turn past the overlap limit takes the shot even from the same spot: the frames
+  // either side of a swing have to have something in common, or the model splits there.
+  const spun = advise({ mode: 'walk', fov: 34, depth: 1.5, viewer: { position: [0.02, 1.5, 0], forward: [1, 0, 0] }, shots, seconds: 5 })
+  assert.equal(spun.capture, true, 'the chain matters more than the parallax')
+  assert.match(spun.warning, /turning on the spot/i, 'and it still says what is wrong')
 
-  // the same turn, but having walked while doing it, is a legitimate shot
-  const arced = advise({ mode: 'walk', viewer: { position: [0.2, 1.5, 0], forward: [1, 0, 0] }, shots, seconds: 5 })
+  // the same turn, having walked while doing it, is a shot without the complaint
+  const arced = advise({ mode: 'walk', fov: 34, depth: 1.5, viewer: { position: [0.2, 1.5, 0], forward: [1, 0, 0] }, shots, seconds: 5 })
   assert.equal(arced.capture, true)
   assert.equal(arced.warning, null)
+})
+
+test('the thresholds follow the lens and the distance, not a constant', () => {
+  // a phone in portrait sees 34 degrees across, a wide lens twice that: the same rule
+  // has to mean a much smaller step on the narrow one
+  assert.ok(limitsFor({ fov: 34 }).turn < limitsFor({ fov: 70 }).turn)
+  assert.ok(Math.abs(limitsFor({ fov: 34 }).turn - 8.5) < 0.01)
+  // and the step grows with how far away the subject is
+  assert.ok(limitsFor({ depth: 0.8 }).baseline < limitsFor({ depth: 4 }).baseline)
+  // clamped at both ends, so a bad depth reading cannot ask for a 3 metre stride
+  assert.equal(limitsFor({ depth: 40 }).baseline, 0.5)
+  assert.equal(limitsFor({ depth: 0.1 }).baseline, 0.06)
 })
 
 test('the very first shot of a walk is free, there is nothing to compare it with', () => {

@@ -103,19 +103,34 @@ The key lives in `storage/certs/`, which is git ignored — check that it stays 
 
 ### What the guidance actually enforces
 
-A capture dies of three things, and each has a rule in `capture/lib/guidance.js`:
+A capture dies of four things, and each has a rule in `capture/lib/guidance.js`:
 
+- **Gaps.** Two neighbouring shots have to see some of the same thing, so the turn
+  between them is capped at a quarter of the field of view — `limitsFor()` reads the lens
+  out of the intrinsics rather than assuming one. **The thresholds are not constants,
+  and the first real capture is why**: a phone in portrait sees 34° across, where the
+  original fixed rule of 30 cm or 25° left a quarter of the frame shared. 35 of 67
+  neighbouring pairs turned more than half the lens, 7 shared nothing at all, and COLMAP
+  registered 16 frames out of 68. Replaying that same walk through the current rule
+  gives 157 frames, a median turn of 8.5°, a maximum of 9°, and no pair under half the
+  lens.
+- **Steps too long for the subject.** The sideways step is capped at an eighth of the
+  distance to what is in front, which the ARCore hit test measures live — a step that
+  is fine across a courtyard is a different view entirely across a table.
 - **Rotation without translation.** A panorama has no parallax, so nothing triangulates.
   In orbit mode the shutter is gated on the angle *around the subject*, so standing still
-  and turning earns nothing however long you wait; in walk mode turning past 25° having
-  moved less than 12 cm raises a warning by name.
-- **Gaps.** Shots are taken every `ORBIT.angularStep` (12°) around the subject, which is
-  the overlap two neighbouring views need, and the ring targets tell you where to walk
-  next. Coverage is the fraction of targets a shot has passed within 18° of.
-- **Blur.** Every frame is scored by the variance of its Laplacian — the same measure
-  `pipeline.py` uses to pick frames out of a video — and dropped if it falls under 55% of
-  the running median of this capture. Relative, because a white wall scores low while
-  perfectly in focus.
+  and turning earns nothing however long you wait. In walk mode a turn past the overlap
+  limit *does* take a shot, and says what you are doing wrong at the same time: refusing
+  it is what tore the first capture apart, since the frames either side of an unrecorded
+  swing have nothing in common to join them by.
+- **Blur, and its quieter twin.** Every frame is scored by the variance of its Laplacian
+  — the same measure `pipeline.py` uses on video — and dropped under 55% of this
+  capture's running median. But a white wall is in perfect focus and equally useless, so
+  the server also counts FAST corners on arrival and the phone says so out loud when the
+  recent frames are starved. Measured: a stone facade that reconstructs gives 2846
+  corners a frame, a fruit on a table 1694, and the white freezer in a white corner that
+  failed, 254. The corner count tracks COLMAP's own keypoint count at 0.83 where the
+  Laplacian variance, which confuses flat with blurred, manages 0.70.
 
 Two rings of twelve targets at 8° and 28° of elevation, because one ring reconstructs a
 band and leaves the top of the object a guess.
@@ -190,13 +205,26 @@ capture, the `getUserMedia` path against a canvas backed fake camera, and — th
 matters — 16 real photos replayed through the HTTP API and reconstructed by the pipeline
 into the same models the same photos give when copied by hand.
 
-**Not verified: a real Android phone.** No device was in the loop, so the WebXR session,
-`camera-access` readback and the ARCore poses are written against the specification and
-Chrome's implementation of it, and have never run. The first phone to open this will find
-whatever that missed — the likely candidates are the camera image resolution (it is the
-tracking stream, which on some devices is well under the 1024 px the pipeline wants) and
-the intrinsics derivation, which assumes the camera image is aligned with the view
-frustum.
+**Then a real phone ran it**, which settled the parts that could only be guessed at. The
+WebXR session, the `camera-access` readback and the ARCore poses all work: an Android
+Chrome captured 68 frames at 868×1920 with poses, intrinsics and timestamps, and the
+manifest came back whole. What it also produced was a reconstruction in pieces, which is
+where the field of view rule above comes from — the guess that hurt was not the API, it
+was assuming a wide lens.
+
+Still unverified: a capture that reconstructs. `test1` is the only real one so far and it
+failed twice over, on overlap and on texture, so the fixed thresholds have been replayed
+against its trajectory but never walked. The diagnosis in `capture.json` is the thing to
+read after the next attempt.
+
+### After a capture
+
+`capture.json` carries a `diagnosis` per session: the field of view, the median corner
+count, how many neighbouring pairs turned past half the lens, how many shared nothing,
+and a verdict in words. On `test1` it reads *"7 pairs of neighbouring frames share no
+view at all, the model will break there; the scene is short of texture (254 corners a
+frame, against 1700 to 2800 on captures that reconstruct)"* — which is the whole
+post mortem, available before the pipeline runs rather than 45 minutes into it.
 
 ## Video input
 
