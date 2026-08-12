@@ -1,19 +1,67 @@
 # Play Colmap
 
-## Running
+A COLMAP playground that runs end to end on a Mac, with no CUDA anywhere: capture a
+dataset with an Android phone, reconstruct it (sparse, then dense on CPU, optionally a
+gaussian splat), localise single photos against the result, and look at all of it in a
+browser.
 
-```bash
-python pipeline.py --dataset storage/datasets/banana --reset
-python relocation.py --dataset storage/datasets/banana --image storage/inputs/relocation_banana.jpg --output storage/relocations/banana
+```
+capture_server.py + capture/   a phone fills storage/datasets/<name>/train/
+pipeline.py                    train/ becomes a reconstruction
+relocation.py                  where was this photo taken from?
+viewer_server.py + viewer/     the result, in a browser
 ```
 
-Two servers bracket the pipeline, each with the page it serves — `<name>_server.py`
-serves `<name>/`:
+## Getting a dataset
+
+`storage/` is empty in a fresh clone — every dataset is git-ignored, including the ones
+named in the measurements further down, which are local captures. So the first step is
+always to make one. A dataset is just a folder with a `train/` in it:
+
+```
+storage/datasets/<name>/train/    photos, or a single .mov/.mp4/.m4v
+```
+
+Three ways to fill it, in the order they are worth trying:
+
+**From your phone.** Start the capture server, scan the QR it prints, and walk around
+the subject while the page tells you where to go. Frames and ARCore poses land straight
+in `train/`. Needs Chrome on Android with ARCore; see [docs/capture.md](docs/capture.md)
+for why it serves HTTPS and what the guidance enforces.
 
 ```bash
-python capture_server.py    # capture/ — a phone fills storage/datasets/<name>/train/
-python viewer_server.py     # viewer/  — what the pipeline made of it, in a browser
+python capture_server.py
 ```
+
+**From photos you already have.** Drop them in and go. Shots have to overlap and come
+from different places — a ring of photos around a thing, not a panorama from one spot.
+
+```bash
+mkdir -p storage/datasets/kitchen/train && cp ~/Pictures/kitchen/*.jpg storage/datasets/kitchen/train/
+```
+
+**From a video.** A `train/` holding a clip instead of photos is cut into as many even
+windows as the cap allows, each giving up its sharpest frame, so the scene is covered
+evenly and the frames motion blur ruined are skipped. Everything after that is identical.
+
+```bash
+mkdir -p storage/datasets/kitchen/train && cp ~/Movies/kitchen.mov storage/datasets/kitchen/train/
+```
+
+Public datasets work too — COLMAP's own `south-building` is what several numbers below
+were measured on.
+
+## Running the pipeline
+
+```bash
+python pipeline.py --dataset storage/datasets/kitchen --reset
+```
+
+Every step skips work already on disk, so re-running is cheap and `--reset` is how you
+force a rebuild. In order: resize the photos into `images/`, extract features, match every
+pair, build the sparse model and export it three ways (PLY, COLMAP text, and a
+`transforms.json` for NeRF tooling), undistort into the dense workspace, sweep the depth
+maps, fuse them into `dense/fused.ply`, and finish with the relocalisation check.
 
 `IMAGE_MAX_ITEMS` in [pipeline.py](pipeline.py) caps how many photos of `train/` are
 used, 300 by default. Matching is quadratic in their number, so a denser capture costs
@@ -21,44 +69,50 @@ much more than it adds; over the cap the photos are decimated uniformly (400 cap
 300 keeps three and skips one) instead of cutting the tail, which would leave a hole in
 the scene. Set it to 0 to use them all.
 
-`train/` can hold a `.mov`, `.mp4` or `.m4v` instead of photos. The clip is cut into as
-many even windows as the cap allows and each one gives up its sharpest frame, so the
-scene is covered evenly and the frames motion blur ruined are skipped. Everything after
-that is the same pipeline.
+If a capture comes back as several models instead of one, `MAPPER_MIN_INLIERS` and its
+two neighbours are the reason more often than the scene is — see
+[docs/reconstruction.md](docs/reconstruction.md).
+
+## The two servers
+
+Each is named after the page it serves: `<name>_server.py` serves `<name>/`.
 
 ```bash
-mkdir -p storage/datasets/kitchen/train && cp ~/Movies/kitchen.mov storage/datasets/kitchen/train/
-python pipeline.py --dataset storage/datasets/kitchen
+python capture_server.py    # capture/ — https://<lan-ip>:8443, a QR of it in the terminal
+python viewer_server.py     # viewer/  — http://localhost:8000
+```
+
+The viewer is a React app built by Vite; it is served from `viewer/dist`, so build it
+once after cloning:
+
+```bash
+cd viewer && yarn install && yarn build
 ```
 
 ## Dense reconstruction
 
-The pipeline ends with a dense reconstruction that runs entirely on CPU (COLMAP's
-`patch_match_stereo` is CUDA-only), producing `storage/datasets/<name>/dense/fused.ply`.
-Depth maps come from the plane-sweep MVS in `libs/cpu_mvs.py`, the fusion from pycolmap.
+The dense step runs entirely on CPU (COLMAP's `patch_match_stereo` is CUDA-only),
+producing `storage/datasets/<name>/dense/fused.ply`. Depth maps come from the
+plane-sweep MVS in `libs/cpu_mvs.py`, the fusion from pycolmap.
 
 ```bash
-python pipeline.py --dataset storage/datasets/banana --dense-max-size 1024  # denser, ~2.5x slower
+python pipeline.py --dataset storage/datasets/kitchen --dense-max-size 1024  # denser, ~2.5x slower
 ```
 
 Roughly 1.4s per image at the default `--dense-max-size 640` on an M4 (10 cores).
-See [AGENTS.md](AGENTS.md) for the details and the remaining tuning flags.
+See [docs/reconstruction.md](docs/reconstruction.md) for the details and the remaining
+tuning flags.
 
 ## Gaussian splatting
 
-The pipeline ends by training a 3D Gaussian Splatting scene on CPU (no CUDA
-rasteriser) from the dense point cloud, writing `storage/datasets/<name>/splat/`:
-`point_cloud.ply` in the standard 3DGS layout, `metrics.json`, and photo/render
-comparisons under `renders/`. Tune it with `--splat-iterations`, `--splat-max-size`,
-`--splat-max-gaussians`, `--splat-warmup`.
+There is a CPU 3D Gaussian Splatting trainer (no CUDA rasteriser) that turns the dense
+cloud into `storage/datasets/<name>/splat/`: `point_cloud.ply` in the standard 3DGS
+layout, `metrics.json`, and photo/render comparisons under `renders/`.
 
-To retrain it, delete `splat/` (or pass `--reset`) and run the pipeline again — every
-other step is skipped since its output already exists:
-
-```bash
-rm -rf storage/datasets/banana/splat
-python pipeline.py --dataset storage/datasets/banana --splat-iterations 4000
-```
+**It is commented out of the step list in [pipeline.py](pipeline.py)** — it costs more
+than the rest of the pipeline put together, and most runs do not want it. Uncomment the
+`Build Gaussian Splat` line to put it back, and tune it with `--splat-iterations`,
+`--splat-max-size`, `--splat-max-gaussians`, `--splat-warmup`.
 
 Half of the iterations run on half resolution views (`--splat-warmup`), which costs a
 quarter per step: on an M4 (10 cores) an iteration is 0.15s during the warmup and
@@ -87,7 +141,7 @@ red by reprojection error. It is the only way to judge a pose without ground tru
 and the viewer opens it from the relocation list.
 
 ```bash
-python relocation.py --dataset storage/datasets/banana --image storage/inputs/query.jpg --output storage/relocations/banana
+python relocation.py --dataset storage/datasets/kitchen --image ~/Pictures/query.jpg --output storage/relocations/kitchen
 ```
 
 Measured on queries built from dataset photos re-encoded at 75% scale, gamma 1.35 and
@@ -103,12 +157,38 @@ is then exact ground truth. Position error as a percentage of the scene radius:
 | over-office-1 (416 views) | 32.8% / 5.96° | 0.03% / 0.017° | 2.0s |
 
 Every query lands within 2% of the scene radius and 2°, none did before. See
-[AGENTS.md](AGENTS.md) for what changed and what did not help.
+[docs/relocalisation.md](docs/relocalisation.md) for what changed and what did not help.
 
 The viewer does the same thing without the command line: pick a dataset, hit **Locate a
 photo** in the Relocations panel, and the upload comes back as a red frustum in the
 scene with its overlay opened. A photo the dataset does not contain is rejected rather
 than placed somewhere plausible.
+
+### How good is this model at being relocalised against?
+
+The last pipeline step answers that without you having to ask: it hides a spread of the
+dataset's own images, one at a time, localises each against what is left, and pushes
+until it fails. The report lands in `storage/datasets/<name>/relocation.json`.
+
+It reports **margins, not accuracy**, because accuracy does not discriminate — every
+healthy dataset places a held-out photo within a hundredth of a percent. What varies is
+how far from the mapped path a query can be before it stops registering at all, so each
+holdout is pushed away (hiding its nearest views) and degraded (resolution, blur, JPEG)
+until the pose leaves tolerance. `--relocation-stride 0` skips the whole check.
+
+## A note on the numbers above
+
+Every dataset named in this file is a local capture, kept out of the repo by
+`.gitignore` along with everything else under `storage/`. The measurements are recorded
+so the reasoning behind a default can be checked, not so they can be re-run on a fresh
+clone — you would need the same photos for that.
+
+## Where the details are
+
+[AGENTS.md](AGENTS.md) is the map: environment, layout and conventions, pointing at one
+file per domain in [docs/](docs) — [capture](docs/capture.md),
+[reconstruction](docs/reconstruction.md), [relocalisation](docs/relocalisation.md),
+[splatting](docs/splatting.md). Each records what was measured, including what failed.
 
 ## Util links
 
