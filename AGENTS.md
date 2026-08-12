@@ -230,6 +230,37 @@ view at all, the model will break there; the scene is short of texture (254 corn
 frame, against 1700 to 2800 on captures that reconstruct)"* — which is the whole
 post mortem, available before the pipeline runs rather than 45 minutes into it.
 
+## When a model comes back in pieces
+
+The first thing to check is not the capture, it is whether the matches to join it are
+already in the database. Matching is exhaustive — every pair, not a chain — so a frame
+of blank wall cannot break a sequence, and two frames that see the same thing are tried
+against each other however far apart they were taken.
+
+Build the view graph out of `two_view_geometries` and count its connected components at
+a few inlier thresholds. On `test4`, a capture of white walls that came back as three
+models, **190 of 205 images were one component at 15 inlier matches** — and at 30, the
+graph fell into 23 pieces. COLMAP's `Mapper.abs_pose_min_num_inliers` is 30. The model
+was not disconnected, the mapper was refusing links that existed, which is why the
+thresholds at the top of `pipeline.py` are lowered to what the view graph offers.
+
+The measurement that justifies them, largest model out of the images available:
+
+| | stock COLMAP | lowered |
+|---|---|---|
+| `test4` (starved of texture) | 63 of 205 | **107**, reprojection 0.75 px |
+| `banana` | 14 + 7, two models | **15, one model**, same points, 0.25 px |
+| `south-building` | 128, one model | 128, unchanged, 0.35 px |
+
+The control is the half that matters: a threshold that rescues a bad capture is only
+worth having if it invents nothing on a good one, and the reprojection error not moving
+is what says the extra images are real rather than forced.
+
+What does *not* help, measured on the same 60 frames: more features. Dropping SIFT's peak
+threshold takes the keypoint count from 702 to 1751 and the largest model from 31 to 31;
+at 1440 px it reaches 3300 keypoints and *six* models instead of three. On a blank wall
+more features are more indistinct blobs, and they match each other wrongly.
+
 ## Video input
 
 `build_images` falls back to `build_frames` when `train/` has a clip and no photos.

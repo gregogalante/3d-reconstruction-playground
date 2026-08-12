@@ -29,6 +29,21 @@ VIDEO_EXTENSIONS = ('.mov', '.mp4', '.m4v')
 DENSE_MIN_NUM_PIXELS = 3
 DENSE_MAX_NORMAL_ERROR = 25.0
 
+# What the mapper needs before it will register an image. COLMAP's defaults (30 inliers,
+# a quarter of them, 3 attempts) are what decides whether a model stays whole, and on a
+# scene short of texture they cut it to pieces while the matches to join it are sitting
+# in the database: on `test4`, 190 of 205 images are one connected component at 15 inlier
+# matches, and the mapper still produced 63 + 38 + 26 + 15 + 14 + 3. Lowering the bar to
+# what the view graph actually offers takes the largest model to 107, with the mean
+# reprojection error unmoved at 0.75 px — the extra images are real, not forced.
+#
+# Measured against captures that were already fine, which is the half that matters:
+# `banana` stops splitting (14 + 7 becomes 15, same points, same 0.25 px) and
+# `south-building` does not move at all, 128 images either way at 0.35 px.
+MAPPER_MIN_INLIERS = 15
+MAPPER_MIN_INLIER_RATIO = 0.1
+MAPPER_MAX_REG_TRIALS = 5
+
 # Leave one out relocalisation check: one image every RELOCATION_STRIDE is localised
 # against the model with itself hidden. The bounds keep it worth running on a small
 # capture and short on a large one, at roughly 8 seconds per image.
@@ -236,7 +251,11 @@ def build_sfm_reconstruction(database_path, images_path, sfm_path):
     os.makedirs(sfm_path, exist_ok=True)
 
   print_info("Running incremental mapping to build SFM reconstruction using pycolmap...")
-  reconstructions = pycolmap.incremental_mapping(database_path, images_path, sfm_path)
+  options = pycolmap.IncrementalPipelineOptions()
+  options.mapper.abs_pose_min_num_inliers = MAPPER_MIN_INLIERS
+  options.mapper.abs_pose_min_inlier_ratio = MAPPER_MIN_INLIER_RATIO
+  options.mapper.max_reg_trials = MAPPER_MAX_REG_TRIALS
+  reconstructions = pycolmap.incremental_mapping(database_path, images_path, sfm_path, options=options)
   if len(reconstructions) > 1:
     # everything downstream reads sfm/0 only, so say it out loud instead of quietly
     # reconstructing a third of the scene
@@ -515,6 +534,9 @@ def main():
     "image_max_items": IMAGE_MAX_ITEMS,
     "image_extensions": list(IMAGE_EXTENSIONS),
     "video_extensions": list(VIDEO_EXTENSIONS),
+    "mapper_min_inliers": MAPPER_MIN_INLIERS,
+    "mapper_min_inlier_ratio": MAPPER_MIN_INLIER_RATIO,
+    "mapper_max_reg_trials": MAPPER_MAX_REG_TRIALS,
     "dense_min_num_pixels": DENSE_MIN_NUM_PIXELS,
     "dense_max_normal_error": DENSE_MAX_NORMAL_ERROR,
     "dense_max_size": args.dense_max_size,
