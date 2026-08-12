@@ -15,7 +15,7 @@ OpenCV, holding one frame at a time. Frames land as `frame_00000.jpg` and the re
 the pipeline cannot tell the difference, except that they carry no EXIF, so every
 camera starts from COLMAP's default focal prior.
 
-Measured on a clip built from `over-office-2`'s 205 photos. Whole clip through the
+Measured on a clip built from the 205 photos of an office capture. Whole clip through the
 pipeline: 205 frames extracted, 205 registered in a single SfM model, 2.8M dense
 points at 82 to 90% depth coverage per frame, splat trained. Capped at 60 frames it
 splits into 3 models of 33/10/7 images, but so does running on 60 of the original
@@ -32,9 +32,9 @@ of blank wall cannot break a sequence, and two frames that see the same thing ar
 against each other however far apart they were taken.
 
 Build the view graph out of `two_view_geometries` and count its connected components at
-a few inlier thresholds. On `test4`, a capture of white walls that came back as three
-models, **190 of 205 images were one component at 15 inlier matches** — and at 30, the
-graph fell into 23 pieces. COLMAP's `Mapper.abs_pose_min_num_inliers` is 30. The model
+a few inlier thresholds. On a 205 frame phone capture of white kitchen walls that came
+back as three models, **190 of its 205 images were one component at 15 inlier matches** —
+and at 30, the graph fell into 23 pieces. COLMAP's `Mapper.abs_pose_min_num_inliers` is 30. The model
 was not disconnected, the mapper was refusing links that existed, which is why the
 thresholds at the top of `pipeline.py` are lowered to what the view graph offers.
 
@@ -42,7 +42,7 @@ The measurement that justifies them, largest model out of the images available:
 
 | | stock COLMAP | lowered |
 |---|---|---|
-| `test4` (starved of texture) | 63 of 205 | **107**, reprojection 0.75 px |
+| the white walls, 205 frames | 63 of 205 | **107**, reprojection 0.75 px |
 | `banana` | 14 + 7, two models | **15, one model**, same points, 0.25 px |
 | `south-building` | 128, one model | 128, unchanged, 0.35 px |
 

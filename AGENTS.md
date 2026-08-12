@@ -37,12 +37,15 @@ cd viewer && yarn build     # the viewer is served from viewer/dist
 ```
 
 **There are no datasets in the repo.** Everything under `storage/` is git-ignored bar the
-`.keep` files, so a fresh clone has nothing to run on and the first move is always to
-make a dataset — from a phone with `capture_server.py`, or by dropping photos or a clip
-into `storage/datasets/<name>/train/`. Every dataset named in these notes (`banana`,
-`south-building`, `test1`, `test2`, `test4`, `home`, `over-office-1`, `over-office-2`)
-is a local capture that measurements were taken on, not something you can obtain by
-cloning.
+`.keep` files, so a fresh clone has nothing to run on and the first move is always to make
+a dataset — from a phone with `capture_server.py`, or by dropping photos or a clip into
+`storage/datasets/<name>/train/`.
+
+The measurements throughout `docs/` name two datasets and describe the rest. Named:
+`south-building`, which is COLMAP's public dataset and can be fetched, and `banana`, a
+14 photo capture of an object. Everything else — the phone captures, an office, a flat —
+was local, has since been deleted, and is described by what it was, because a folder name
+nobody can obtain is not a reference.
 
 ## Layout
 

@@ -151,16 +151,16 @@ manifest came back whole. What it also produced was a reconstruction in pieces, 
 where the field of view rule above comes from — the guess that hurt was not the API, it
 was assuming a wide lens.
 
-Still unverified: a capture that reconstructs. `test1` is the only real one so far and it
-failed twice over, on overlap and on texture, so the fixed thresholds have been replayed
-against its trajectory but never walked. The diagnosis in `capture.json` is the thing to
-read after the next attempt.
+Still unverified: a capture that reconstructs. The phone captures so far were of white
+kitchen walls and failed twice over, on overlap and on texture, so the fixed thresholds
+have been replayed against their trajectories but never walked with. The diagnosis in
+`capture.json` is the thing to read after the next attempt.
 
 ### After a capture
 
 `capture.json` carries a `diagnosis` per session: the field of view, the median corner
 count, how many neighbouring pairs turned past half the lens, how many shared nothing,
-and a verdict in words. On `test1` it reads *"7 pairs of neighbouring frames share no
+and a verdict in words. On the first phone capture it read *"7 pairs of neighbouring frames share no
 view at all, the model will break there; the scene is short of texture (254 corners a
 frame, against 1700 to 2800 on captures that reconstruct)"* — which is the whole
 post mortem, available before the pipeline runs rather than 45 minutes into it.

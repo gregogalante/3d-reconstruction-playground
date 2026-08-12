@@ -152,9 +152,9 @@ is then exact ground truth. Position error as a percentage of the scene radius:
 |---|---|---|---|
 | banana (14 views) | 33.2% / 2.80° | 0.03% / 0.009° | 2.0s |
 | banana (65 views) | 136.6% / 5.83° | 0.23% / 0.051° | 1.5s |
-| over-office-2 (205 views) | 35.2% / 6.38° | 0.05% / 0.023° | 1.5s |
+| an office, 205 views | 35.2% / 6.38° | 0.05% / 0.023° | 1.5s |
 | south-building (128 views) | 20.1% / 4.43° | 0.01% / 0.009° | 6s |
-| over-office-1 (416 views) | 32.8% / 5.96° | 0.03% / 0.017° | 2.0s |
+| the same office, 416 views | 32.8% / 5.96° | 0.03% / 0.017° | 2.0s |
 
 Every query lands within 2% of the scene radius and 2°, none did before. See
 [docs/relocalisation.md](docs/relocalisation.md) for what changed and what did not help.
@@ -178,10 +178,15 @@ until the pose leaves tolerance. `--relocation-stride 0` skips the whole check.
 
 ## A note on the numbers above
 
-Every dataset named in this file is a local capture, kept out of the repo by
-`.gitignore` along with everything else under `storage/`. The measurements are recorded
-so the reasoning behind a default can be checked, not so they can be re-run on a fresh
-clone — you would need the same photos for that.
+Two are named because the name means something. `south-building` is COLMAP's own public
+dataset, so those rows can be reproduced from scratch; `banana` is a 14 photo capture of
+an object, still on the machine these were measured on but not in the repo, since
+`.gitignore` keeps all of `storage/` out of it.
+
+Everything else is described rather than named — an office, a flat, the phone captures of
+white kitchen walls — because those folders have since been deleted and a name nobody can
+obtain is not a reference. The measurements stay so the reasoning behind a default can be
+checked, not so it can be re-run on a fresh clone.
 
 ## Where the details are
 
@@ -189,11 +194,3 @@ clone — you would need the same photos for that.
 file per domain in [docs/](docs) — [capture](docs/capture.md),
 [reconstruction](docs/reconstruction.md), [relocalisation](docs/relocalisation.md),
 [splatting](docs/splatting.md). Each records what was measured, including what failed.
-
-## Util links
-
-- https://github.com/ruili3/awesome-dust3r
-- https://github.com/naver/dust3r [https://www.perplexity.ai/search/running-colmap-dense-on-a-macb-l3mZtelGQxmjZizgbo49XA#1]
-- https://github.com/cvg/Hierarchical-Localization
-- https://github.com/freddewitt/CorbeauSplat?tab=readme-ov-file
-- https://github.com/OpsiClear/DepthDensifier

@@ -34,7 +34,7 @@ image dataset, so there is no pipeline artifact to keep in sync.
 
 A pose under `min_inliers` (30, COLMAP's own threshold for registering an image) is
 reported as a failure: RANSAC always finds some minimal set that agrees, so a photo of
-another scene still comes back with a pose. Localising a `home` photo against `banana`
+another scene still comes back with a pose. Localising a photo of a flat against `banana`
 gives 5 inliers out of 97 and used to be stored as a success.
 
 `relocation.relocate()` is the whole flow as one call, shared by the CLI and by
@@ -54,9 +54,9 @@ What actually mattered, measured against the table in [README.md](../README.md):
   away. The calibrated cameras of the reconstruction now win over any EXIF guess.
 - **Refining the focal and the distortion with the pose.** The reconstruction gives one
   camera per image and they disagree by a few percent, which is a few percent of error
-  along the view direction. Solving for them takes the median position error on `home`
-  from 3.3% of the scene radius to 0.23%, and on `over-office-1` from 0.08% to 0.02%.
-  Refining the focal alone is not enough (`home` stops at 1.08%).
+  along the view direction. Solving for them takes the median position error on a flat
+  from 3.3% of the scene radius to 0.23%, and on a 416 view office from 0.08% to 0.02%.
+  Refining the focal alone is not enough (the flat stops at 1.08%).
 
 ### Leave one out evaluation
 
@@ -140,8 +140,8 @@ shows up here long before it shows up in the position error.
 
 - **Dense depth adds correspondences but not accuracy.** Lifting the matched keypoints
   that were never triangulated (`--dense`, `DenseDepth` in `libs/localizer.py`) gives
-  50 to 90% more correspondences and changes the pose by less than the noise: `home`
-  0.33% of radius against 0.23% without, `over-office-1` 0.02% against 0.04%, at 1.5x
+  50 to 90% more correspondences and changes the pose by less than the noise: the flat
+  0.33% of radius against 0.23% without, the office 0.02% against 0.04%, at 1.5x
   the matching cost. The MVS depths are simply less accurate than the triangulated
   points. Kept as a flag, off by default.
 
