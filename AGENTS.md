@@ -149,13 +149,11 @@ leaves by three doors:
 - **the coverage dial around the shutter**, two rings of segments filling in as you go.
   It answers *which side have I not done*, which a percentage cannot and a map only can
   if you stop to read it. World fixed, since a dial spinning with the phone is unusable
-  while walking. The walk mode has the breadcrumb radar instead, where there is no orbit
-  to fill.
-- **the voice**: every advice carries a stable `cue` — `right`, `up`, `close`, `spin`,
-  `complete` — spoken through `SpeechSynthesis`, a changed cue interrupting and the same
-  one repeating every nine seconds. Cues rather than the on screen sentence, so wording
-  and speech cannot drift apart.
+  while walking. In walk mode, where there is no orbit to cover, the same dial fills
+  towards the next frame instead, and the breadcrumb radar sits beside it.
 - **the vibration motor**: one buzz per frame, a triple at each quarter of the orbit.
+  Silent on purpose — a capture happens in rooms with other people in them. Spoken
+  guidance was built and then removed for the same reason.
 
 Two more things the UI refuses to let happen quietly. Finishing a capture under twelve
 frames or under 60% coverage is argued with once — *keep capturing* or *finish anyway* —

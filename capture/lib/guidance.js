@@ -181,13 +181,17 @@ function walkAdvice (state) {
   const { viewer, shots, seconds } = state
   const limits = limitsFor({ fov: state.fov, depth: state.depth })
   if (!shots.length) {
-    return { capture: seconds >= WALK.minSeconds, cue: 'start', progress: 0, text: 'Start walking', warning: null, arrow: null, target: null, limits }
+    return { capture: seconds >= WALK.minSeconds, cue: 'start', progress: 0, readiness: 1, text: 'Start walking', warning: null, arrow: null, target: null, limits }
   }
 
   const last = shots[shots.length - 1]
   const travel = distance(viewer.position, last.position)
   const turn = angleBetween(viewer.forward, last.forward)
-  const advice = { capture: false, cue: 'walk', progress: 0, target: null, arrow: null, text: '', warning: null, distance: travel, limits }
+  // How close the next shot is, as a fraction: whichever of walking and turning gets
+  // there first. The dial around the shutter draws this, so a walk has something to read
+  // where an orbit has its coverage.
+  const readiness = Math.min(1, Math.max(travel / limits.baseline, turn / limits.turn))
+  const advice = { capture: false, cue: 'walk', progress: 0, readiness, target: null, arrow: null, text: '', warning: null, distance: travel, limits }
 
   // Turning a lot from a spot you have not left is exactly how you end up with a
   // panorama, which is the one capture no amount of matching can rescue.

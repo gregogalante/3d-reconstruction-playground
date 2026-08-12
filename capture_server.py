@@ -477,6 +477,22 @@ async def not_found(request, error):
     return FileResponse(CAPTURE_UI / "index.html")
 
 
+@app.middleware("http")
+async def never_cache_the_ui(request, call_next):
+    """Hand the phone the page as it is on disk, every time.
+
+    The capture page is a handful of ES modules served straight off the filesystem, and a
+    browser holding one of them from an earlier visit will happily pair it with a newer
+    one — which is a capture running half of yesterday's rules while the manifest claims
+    today's. Cheap to refetch on a local network, and it removes a whole class of
+    "but I fixed that".
+    """
+    response = await call_next(request)
+    if not request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store, must-revalidate"
+    return response
+
+
 if CAPTURE_UI.exists():
     app.mount("/", StaticFiles(directory=str(CAPTURE_UI), html=True), name="capture")
 

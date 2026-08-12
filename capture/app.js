@@ -10,7 +10,7 @@
 import * as api from './lib/api.js'
 import { capabilities, startSession, sharpnessOf } from './lib/xr.js'
 import { advise, planOrbit, recordShot, coveredTargets } from './lib/guidance.js'
-import { drawRadar, drawCoverageRing } from './lib/radar.js'
+import { drawRadar, drawCoverageRing, drawShotProgress } from './lib/radar.js'
 import { forwardOf, angleBetween } from './lib/vec.js'
 import { createSimulator } from './lib/simulate.js'
 
@@ -46,12 +46,11 @@ const state = {
   lastCapture: 0,
   lastRadar: 0,
   hit: null,
+  depth: null,
   rejected: 0,
   video: null,
   interval: null,
   milestone: 0,
-  spokenCue: null,
-  spokenAt: 0,
   fov: null,
   features: []
 }
@@ -238,45 +237,10 @@ function showWarning (message) {
 // FEEDBACK YOU DO NOT HAVE TO LOOK AT
 // ----------------------------------------------------------------------------
 
-// Walking around a thing, you are watching the thing, not the phone. The screen is
-// held up in front of the subject and read at a glance if at all, so the guidance also
-// leaves through the speaker and the vibration motor.
-const SPOKEN = {
-  right: 'keep going right',
-  left: 'keep going left',
-  up: 'raise the phone',
-  down: 'lower the phone',
-  behind: 'turn around and keep going',
-  close: 'step back',
-  far: 'step closer',
-  aim: 'point at the subject',
-  spin: 'walk sideways, do not turn on the spot',
-  complete: 'every angle covered',
-  subject: 'point at your subject, then set it',
-  start: 'start walking'
-}
-const MILESTONES = [[0.25, 'a quarter of the way'], [0.5, 'half way'], [0.75, 'three quarters']]
-const SAY_NEW_CUE_AFTER = 2000
-const REPEAT_CUE_AFTER = 9000
-
-function say (line, { force = false } = {}) {
-  if (!line || !el('voice').checked || !window.speechSynthesis) return
-  if (force) window.speechSynthesis.cancel()
-  const utterance = new window.SpeechSynthesisUtterance(line)
-  utterance.rate = 1.1
-  window.speechSynthesis.speak(utterance)
-}
-
-function speakCue (cue) {
-  const line = SPOKEN[cue]
-  const now = window.performance.now()
-  const since = now - state.spokenAt
-  // a changed cue is news and interrupts; the same one repeats slowly, as a reminder
-  if (cue === state.spokenCue ? since < REPEAT_CUE_AFTER : since < SAY_NEW_CUE_AFTER) return
-  state.spokenCue = cue
-  state.spokenAt = now
-  say(line, { force: true })
-}
+// Walking around a thing, you are watching the thing, not the phone, so a shot announces
+// itself through the vibration motor: one buzz a frame, a triple at each quarter of the
+// orbit. Silent on purpose — a capture happens in rooms with other people in them.
+const MILESTONES = [0.25, 0.5, 0.75]
 
 function buzz (pattern) {
   if (navigator.vibrate) navigator.vibrate(pattern)
@@ -284,7 +248,7 @@ function buzz (pattern) {
 
 // The other way a frame is useless, and the one nothing on the phone can see: a white
 // wall is in perfect focus and has nothing to match. The server counts the corners it
-// finds and this says so out loud, once, while there is still time to aim elsewhere.
+// finds and this says so, once, while there is still time to aim elsewhere.
 function noteTexture (count) {
   if (typeof count !== 'number') return
   state.features.push(count)
@@ -295,7 +259,6 @@ function noteTexture (count) {
   if (sorted[Math.floor(sorted.length / 2)] >= FEATURES_STARVED) return
   state.texturedWarned = true
   flash('Almost nothing to match here — take in more of the room')
-  say('almost nothing to match here, take in more of the room', { force: true })
 }
 
 // ----------------------------------------------------------------------------
@@ -317,7 +280,6 @@ async function runGuided () {
   if (SIMULATE) window.captureDebug = { session, state, shoot }
 
   el('subject-prompt').hidden = state.mode !== 'orbit'
-  el('ring').hidden = state.mode !== 'orbit'
   el('radar').hidden = state.mode === 'orbit'
 
   session.run((pose, frame) => {
@@ -330,6 +292,9 @@ async function runGuided () {
     // far a step may be, and a step measured in metres means nothing without it.
     if (state.mode === 'walk' || !state.plan) {
       state.hit = session.hitDistance ? session.hitDistance(frame) : null
+      state.depth = state.hit
+        ? Math.hypot(...state.hit.position.map((value, axis) => value - viewer.position[axis]))
+        : null
     }
     if (state.mode === 'orbit' && !state.plan) {
       const prompt = el('subject-prompt').querySelector('p')
@@ -351,7 +316,7 @@ async function runGuided () {
       viewer,
       shots: state.shots,
       fov: state.fov,
-      depth: state.hit ? Math.hypot(...state.hit.position.map((value, axis) => value - viewer.position[axis])) : null,
+      depth: state.depth,
       seconds: (window.performance.now() - state.lastCapture) / 1000
     })
     paint(advice, session)
@@ -420,24 +385,29 @@ function paint (advice, session) {
     el('hud-count').textContent = `${state.shots.length} · ${Math.round(advice.progress * 100)}%`
   }
 
+  // Orbiting, the number that matters is how far you are from the subject. Walking, it is
+  // how far the wall in front is, since that is what sets the length of a step — the
+  // distance since the last frame is already the dial's job.
   const distance = el('hud-distance')
-  distance.hidden = advice.distance == null
-  if (advice.distance != null) {
-    distance.textContent = `${advice.distance.toFixed(1)} m`
+  const metres = state.mode === 'orbit' ? advice.distance : state.depth
+  distance.hidden = metres == null
+  if (metres != null) {
+    distance.textContent = `${metres.toFixed(1)} m`
     distance.style.color = ['close', 'far'].includes(advice.cue) ? 'var(--warn)' : ''
   }
 
-  speakCue(advice.warning ? 'spin' : advice.cue)
   announceMilestone(advice.progress)
 
   const now = window.performance.now()
   if (now - state.lastRadar > 100) {
     state.lastRadar = now
-    // one or the other: the ring is the better map when there is an orbit to fill, and
-    // the trail is the only one that means anything when there is not
+    // The dial says something in both modes: coverage of the orbit where there is one,
+    // and how close the next frame is where there is not. The trail beside it is the map
+    // a walk has instead of a ring of targets.
     if (state.mode === 'orbit') {
       drawCoverageRing(el('ring'), { plan: state.plan, shots: state.shots, viewer: state.viewer })
     } else {
+      drawShotProgress(el('ring'), { readiness: advice.readiness || 0, warning: Boolean(advice.warning) })
       drawRadar(el('radar'), { plan: state.plan, shots: state.shots, viewer: state.viewer })
     }
   }
@@ -452,11 +422,10 @@ function paint (advice, session) {
 // it is the only moment a capture has that feels like progress.
 function announceMilestone (progress) {
   if (!progress) return
-  const reached = MILESTONES.filter(([fraction]) => progress >= fraction).length
+  const reached = MILESTONES.filter(fraction => progress >= fraction).length
   if (reached <= state.milestone) return
   state.milestone = reached
   buzz([25, 70, 25])
-  say(MILESTONES[reached - 1][1], { force: true })
 }
 
 function setSubject () {
@@ -591,7 +560,7 @@ function tooThinToLeave () {
 function askBeforeFinishing (message) {
   el('confirm-text').textContent = message
   el('confirm-finish').hidden = false
-  say(message)
+  buzz([40, 80, 40])
   return new Promise(resolve => {
     el('keep-going').onclick = () => {
       el('confirm-finish').hidden = true

@@ -59,6 +59,30 @@ export function drawCoverageRing (canvas, { plan, shots, viewer }) {
   context.restore()
 }
 
+// The same dial, for a walk: no orbit to cover, so it fills towards the next shot
+// instead. Reaching the far end means the viewpoint has moved enough to be worth a frame.
+export function drawShotProgress (canvas, { readiness = 0, warning = false }) {
+  const context = canvas.getContext('2d')
+  const size = canvas.width
+  const middle = size / 2
+  const radius = middle - 30
+  context.clearRect(0, 0, size, size)
+
+  context.lineCap = 'round'
+  context.lineWidth = 13
+  context.beginPath()
+  context.arc(middle, middle, radius, 0, Math.PI * 2)
+  context.strokeStyle = 'rgba(148, 163, 184, 0.28)'
+  context.stroke()
+
+  if (readiness <= 0) return
+  context.beginPath()
+  // from the top, clockwise, because that is how every progress ring anyone has used works
+  context.arc(middle, middle, radius, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * Math.min(1, readiness))
+  context.strokeStyle = warning ? COLOURS.subject : COLOURS.covered
+  context.stroke()
+}
+
 export function drawRadar (canvas, { plan, shots, viewer }) {
   const context = canvas.getContext('2d')
   const size = canvas.width

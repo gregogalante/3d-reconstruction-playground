@@ -140,6 +140,20 @@ test('walking earns a shot by distance, and turning earns one on its own', () =>
   assert.equal(arced.warning, null)
 })
 
+test('a walk always knows how close the next frame is', () => {
+  const shots = [{ position: [0, 1.5, 0], forward: [0, 0, -1], direction: [0, 0, -1] }]
+  const still = advise({ mode: 'walk', fov: 34, depth: 1.5, viewer: viewerAt([0, 1.5, 0], [0, 1.5, -1]), shots, seconds: 5 })
+  assert.equal(still.readiness, 0, 'nothing moved, nothing earned')
+
+  const limits = limitsFor({ fov: 34, depth: 1.5 })
+  const halfway = advise({ mode: 'walk', fov: 34, depth: 1.5, viewer: viewerAt([limits.baseline / 2, 1.5, 0], [limits.baseline / 2, 1.5, -1]), shots, seconds: 5 })
+  assert.ok(Math.abs(halfway.readiness - 0.5) < 0.02)
+
+  const there = advise({ mode: 'walk', fov: 34, depth: 1.5, viewer: viewerAt([limits.baseline * 2, 1.5, 0], [limits.baseline * 2, 1.5, -1]), shots, seconds: 5 })
+  assert.equal(there.readiness, 1, 'the dial fills and stops, it does not wrap')
+  assert.equal(there.capture, true)
+})
+
 test('the thresholds follow the lens and the distance, not a constant', () => {
   // a phone in portrait sees 34 degrees across, a wide lens twice that: the same rule
   // has to mean a much smaller step on the narrow one
