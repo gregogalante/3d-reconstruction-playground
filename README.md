@@ -3,8 +3,8 @@
 ## Running
 
 ```bash
-python pipeline.py --dataset storage/datasets/home --reset
-python relocation.py --dataset storage/datasets/home --image storage/inputs/relocation_home.jpg --output storage/relocations/home
+python pipeline.py --dataset storage/datasets/banana --reset
+python relocation.py --dataset storage/datasets/banana --image storage/inputs/relocation_banana.jpg --output storage/relocations/banana
 ```
 
 `IMAGE_MAX_ITEMS` in [pipeline.py](pipeline.py) caps how many photos of `train/` are
@@ -30,7 +30,7 @@ The pipeline ends with a dense reconstruction that runs entirely on CPU (COLMAP'
 Depth maps come from the plane-sweep MVS in `libs/cpu_mvs.py`, the fusion from pycolmap.
 
 ```bash
-python pipeline.py --dataset storage/datasets/home --dense-max-size 1024  # denser, ~2.5x slower
+python pipeline.py --dataset storage/datasets/banana --dense-max-size 1024  # denser, ~2.5x slower
 ```
 
 Roughly 1.4s per image at the default `--dense-max-size 640` on an M4 (10 cores).
@@ -48,8 +48,8 @@ To retrain it, delete `splat/` (or pass `--reset`) and run the pipeline again �
 other step is skipped since its output already exists:
 
 ```bash
-rm -rf storage/datasets/home/splat
-python pipeline.py --dataset storage/datasets/home --splat-iterations 4000
+rm -rf storage/datasets/banana/splat
+python pipeline.py --dataset storage/datasets/banana --splat-iterations 4000
 ```
 
 Half of the iterations run on half resolution views (`--splat-warmup`), which costs a
@@ -79,7 +79,7 @@ red by reprojection error. It is the only way to judge a pose without ground tru
 and the viewer opens it from the relocation list.
 
 ```bash
-python relocation.py --dataset storage/datasets/home --image storage/inputs/query.jpg --output storage/relocations/home
+python relocation.py --dataset storage/datasets/banana --image storage/inputs/query.jpg --output storage/relocations/banana
 ```
 
 Measured on queries built from dataset photos re-encoded at 75% scale, gamma 1.35 and
@@ -89,7 +89,7 @@ is then exact ground truth. Position error as a percentage of the scene radius:
 | dataset | before | now | time |
 |---|---|---|---|
 | banana (14 views) | 33.2% / 2.80° | 0.03% / 0.009° | 2.0s |
-| home (65 views) | 136.6% / 5.83° | 0.23% / 0.051° | 1.5s |
+| banana (65 views) | 136.6% / 5.83° | 0.23% / 0.051° | 1.5s |
 | over-office-2 (205 views) | 35.2% / 6.38° | 0.05% / 0.023° | 1.5s |
 | south-building (128 views) | 20.1% / 4.43° | 0.01% / 0.009° | 6s |
 | over-office-1 (416 views) | 32.8% / 5.96° | 0.03% / 0.017° | 2.0s |
