@@ -73,12 +73,13 @@
   <p id="setup-error" class="error" hidden></p>
 
   <details class="help">
-    <summary>The four rules of a dataset that reconstructs</summary>
+    <summary>The five rules of a dataset that reconstructs</summary>
     <ol>
       <li><strong>Move, do not spin.</strong> Turning on the spot gives a panorama, and a panorama has no depth to triangulate. Every shot must come from a different place.</li>
       <li><strong>Overlap.</strong> Two neighbouring shots should share most of what they see. Big jumps leave holes nothing can bridge.</li>
       <li><strong>Go around.</strong> One side of a thing reconstructs one side of a thing. Rings at different heights are what close a model.</li>
-      <li><strong>Hold still enough.</strong> Motion blur destroys the corners the whole method is built on. Blurred frames are rejected here rather than later.</li>
+      <li><strong>Hold still enough.</strong> Motion blur destroys the corners the whole method is built on, so blurred frames are dropped — unless dropping one would leave a hole, because a hole is worse.</li>
+      <li><strong>Give it something to look at.</strong> A blank wall is in perfect focus and still impossible: there is nothing on it to match. Keep textured things in frame.</li>
     </ol>
   </details>
 </section>
@@ -102,13 +103,13 @@
   <div class="hud-bottom">
     <div class="side">
       <canvas id="radar" class="radar" width="240" height="240" hidden></canvas>
-      <label class="toggle">
+      <label class="toggle" title="Take the shots for you, when the viewpoint has moved enough">
         <input type="checkbox" id="auto" checked>
-        <span>Auto</span>
+        <span>Auto shots</span>
       </label>
-      <label class="toggle">
+      <label class="toggle" title="Say the guidance out loud, so you can watch the subject instead of the screen">
         <input type="checkbox" id="voice" checked>
-        <span>Voice</span>
+        <span>Spoken</span>
       </label>
     </div>
     <div class="dial">

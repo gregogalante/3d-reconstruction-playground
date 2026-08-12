@@ -18,8 +18,12 @@ export async function openSession (body) {
   return response.json()
 }
 
-export async function finishSession (id) {
-  const response = await window.fetch(`/api/capture/sessions/${id}/finish`, { method: 'POST' })
+export async function finishSession (id, body = {}) {
+  const response = await window.fetch(`/api/capture/sessions/${id}/finish`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body)
+  })
   if (!response.ok) throw new Error('Could not close the capture')
   return response.json()
 }

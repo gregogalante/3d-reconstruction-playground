@@ -11,7 +11,7 @@ import * as api from './lib/api.js'
 import { capabilities, startSession, sharpnessOf } from './lib/xr.js'
 import { advise, planOrbit, recordShot, coveredTargets } from './lib/guidance.js'
 import { drawRadar, drawCoverageRing } from './lib/radar.js'
-import { forwardOf } from './lib/vec.js'
+import { forwardOf, angleBetween } from './lib/vec.js'
 import { createSimulator } from './lib/simulate.js'
 
 const el = id => document.getElementById(id)
@@ -24,7 +24,12 @@ const ABSOLUTE_SHARPNESS = 8
 const RELATIVE_SHARPNESS = 0.55
 const SHARPNESS_MEMORY = 12
 // How long a JPEG encode is given before the frame is written off, see `shoot`.
-const ENCODE_TIMEOUT = 2500
+const ENCODE_TIMEOUT = 1500
+// Longest side of an uploaded frame. pipeline.py resizes everything to
+// IMAGE_MAX_DIMENSION (1024) anyway, so encoding the full 1920 spends the shutter's time
+// on pixels that get thrown away — and the shutter's time is what opens holes in a
+// capture. This keeps some headroom over the cap and still halves the work.
+const UPLOAD_MAX_DIMENSION = 1440
 // Corners per frame under which a scene has nothing for the matcher. The server's own
 // number, kept here to decide when to say so; see FEATURES_STARVED in capture_server.py.
 const FEATURES_STARVED = 750
@@ -53,6 +58,7 @@ const state = {
 
 const scratch = el('scratch')
 const work = document.createElement('canvas')
+const reduced = document.createElement('canvas')
 
 // ----------------------------------------------------------------------------
 // SETUP
@@ -116,11 +122,27 @@ async function warnAboutDataset () {
 // CAPTURE
 // ----------------------------------------------------------------------------
 
-function sharpnessFloor () {
+// How blurred a frame may be before it is thrown away — and it gets more forgiving the
+// longer the chain has been waiting for one.
+//
+// Rejecting a frame is only free while the next one is coming. On the second real
+// capture the breaks were not fast swings outrunning the shutter: on the six pairs that
+// ended up sharing no view, 2.84 seconds passed between frames against 0.55 when things
+// went well, at ordinary turning speed. Something refused every frame through the turn,
+// and by the time one was accepted the view had moved 34 to 80 degrees. A frame blurred
+// by the same turn would have joined those two ends together; the hole cannot be joined
+// by anything.
+function sharpnessFloor (pendingTurn, limit) {
   if (state.scores.length < 5) return ABSOLUTE_SHARPNESS
   const sorted = [...state.scores].sort((a, b) => a - b)
   const median = sorted[Math.floor(sorted.length / 2)]
-  return Math.max(ABSOLUTE_SHARPNESS, median * RELATIVE_SHARPNESS)
+  const floor = Math.max(ABSOLUTE_SHARPNESS, median * RELATIVE_SHARPNESS)
+
+  // Past the overlap limit the frame is holding the chain together, so the bar drops to
+  // the floor of "is this an image at all" and lets it through.
+  if (!limit || !pendingTurn) return floor
+  const urgency = Math.min(1, Math.max(0, (pendingTurn - limit) / limit))
+  return floor * (1 - urgency) + ABSOLUTE_SHARPNESS * urgency
 }
 
 async function shoot (canvas, viewer, extra = {}) {
@@ -133,7 +155,8 @@ async function shoot (canvas, viewer, extra = {}) {
 
   try {
     const score = sharpnessOf(canvas, work)
-    if (score < sharpnessFloor()) {
+    const floor = sharpnessFloor(extra.pending_turn, extra.turn_limit)
+    if (score < floor) {
       state.rejected++
       flash('Too blurry — hold steadier')
       return false
@@ -147,8 +170,9 @@ async function shoot (canvas, viewer, extra = {}) {
     // pending for good, and with it the guard above, so the capture would stop dead
     // without saying anything. Losing one frame to a stalled encoder is the better half
     // of that trade.
+    const source = shrink(canvas)
     const blob = await Promise.race([
-      new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.92)),
+      new Promise(resolve => source.toBlob(resolve, 'image/jpeg', 0.92)),
       new Promise(resolve => window.setTimeout(() => resolve(null), ENCODE_TIMEOUT))
     ])
     if (!blob) {
@@ -172,6 +196,16 @@ async function shoot (canvas, viewer, extra = {}) {
   } finally {
     state.capturing = false
   }
+}
+
+// A copy no larger than the pipeline will keep, drawn once into a canvas that is reused.
+function shrink (canvas) {
+  const scale = UPLOAD_MAX_DIMENSION / Math.max(canvas.width, canvas.height)
+  if (scale >= 1) return canvas
+  reduced.width = Math.round(canvas.width * scale)
+  reduced.height = Math.round(canvas.height * scale)
+  reduced.getContext('2d').drawImage(canvas, 0, 0, reduced.width, reduced.height)
+  return reduced
 }
 
 function showThumbnail (blob) {
@@ -324,7 +358,7 @@ async function runGuided () {
 
     if (advice.capture && el('auto').checked) {
       const canvas = session.grab(scratch)
-      if (canvas) shoot(canvas, viewer, meta(session, advice))
+      if (canvas) shoot(canvas, viewer, meta(session, advice, viewer))
     }
   })
 }
@@ -334,13 +368,37 @@ function distanceTo (a, b) {
   return metres < 1 ? `${Math.round(metres * 100)} cm` : `${metres.toFixed(1)} m`
 }
 
-function meta (session, advice) {
+function meta (session, advice, viewer) {
+  const last = state.shots[state.shots.length - 1]
   return {
     tracking: SIMULATE ? 'simulated' : 'webxr',
     pose: state.pose,
     fov: state.fov,
-    intrinsics: session.intrinsics ? session.intrinsics() : null,
-    target: advice && advice.target ? { azimuth: advice.target.azimuth, elevation: advice.target.elevation } : null
+    intrinsics: scaleIntrinsics(session.intrinsics ? session.intrinsics() : null),
+    target: advice && advice.target ? { azimuth: advice.target.azimuth, elevation: advice.target.elevation } : null,
+    // how far the view had already swung from the last frame that was kept: the blur bar
+    // is relaxed against this, and it is worth having in the manifest afterwards
+    pending_turn: last && viewer ? Math.round(angleBetween(viewer.forward, last.forward) * 10) / 10 : 0,
+    turn_limit: advice && advice.limits ? Math.round(advice.limits.turn * 10) / 10 : null,
+    rejected_before: state.rejected
+  }
+}
+
+// The intrinsics describe the camera image, so shrinking that image moves them too. The
+// raw projection matrix travels alongside untouched, being independent of the size.
+function scaleIntrinsics (intrinsics) {
+  if (!intrinsics) return null
+  const scale = Math.min(1, UPLOAD_MAX_DIMENSION / Math.max(intrinsics.width, intrinsics.height))
+  if (scale >= 1) return intrinsics
+  return {
+    ...intrinsics,
+    width: Math.round(intrinsics.width * scale),
+    height: Math.round(intrinsics.height * scale),
+    fx: intrinsics.fx * scale,
+    fy: intrinsics.fy * scale,
+    cx: intrinsics.cx * scale,
+    cy: intrinsics.cy * scale,
+    uploaded_scale: scale
   }
 }
 
@@ -565,7 +623,7 @@ async function finish ({ ended = false, forced = false } = {}) {
 
   el('guidance').textContent = 'Uploading the last frames…'
   await state.uploader.drain()
-  const summary = await api.finishSession(server.session)
+  const summary = await api.finishSession(server.session, { rejected: state.rejected })
 
   // the server has the poses and the frames, so its reading beats the one the phone can
   // make from shot count alone

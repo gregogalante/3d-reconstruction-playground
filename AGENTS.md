@@ -125,7 +125,13 @@ A capture dies of four things, and each has a rule in `capture/lib/guidance.js`:
   swing have nothing in common to join them by.
 - **Blur, and its quieter twin.** Every frame is scored by the variance of its Laplacian
   — the same measure `pipeline.py` uses on video — and dropped under 55% of this
-  capture's running median. But a white wall is in perfect focus and equally useless, so
+  capture's running median. **But the bar falls as the chain waits**: past the overlap
+  limit the frame is the only thing holding two halves of the capture together, and a
+  blurred frame that joins them beats the hole that replaces it. The second real capture
+  is why. Its six broken pairs were not fast swings outrunning the shutter — 2.84 seconds
+  passed between frames there against 0.55 elsewhere, at ordinary turning speed, so
+  something refused every frame through the turn and the view had moved 34 to 80 degrees
+  by the time one was accepted. But a white wall is in perfect focus and equally useless, so
   the server also counts FAST corners on arrival and the phone says so out loud when the
   recent frames are starved. Measured: a stone facade that reconstructs gives 2846
   corners a frame, a fruit on a table 1694, and the white freezer in a white corner that

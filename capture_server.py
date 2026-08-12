@@ -424,12 +424,15 @@ def diagnose(frames):
 
 
 @app.post("/api/capture/sessions/{session_id}/finish")
-def finish_session(session_id: str):
+def finish_session(session_id: str, body: dict | None = None):
     """Close the capture and hand back the command that turns it into a reconstruction."""
     session = sessions.get(session_id)
     if session is None:
         raise HTTPException(404, "Unknown capture session")
 
+    # frames the phone refused are the explanation for a capture with holes in it, and
+    # the server never sees them: they have to be reported to be recorded
+    session["rejected"] = (body or {}).get("rejected", 0)
     session["finished"] = datetime.datetime.now().isoformat(timespec="seconds")
     session["diagnosis"] = diagnose(session["frames"])
     write_manifest(session)
