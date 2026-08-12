@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "capture",
+      "runtimeExecutable": "/Users/galante/.miniconda3/bin/python",
+      "runtimeArgs": ["capture_server.py", "--http", "--port", "8444"],
+      "port": 8444
+    }
+  ]
+}

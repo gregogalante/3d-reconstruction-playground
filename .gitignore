@@ -11,3 +11,6 @@ storage/inputs/*
 !storage/inputs/.keep
 # the capture server generates a TLS key here, it must never be committed
 storage/certs/
+
+# per-machine Claude Code settings, not project configuration
+.claude/settings.local.json
