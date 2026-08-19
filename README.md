@@ -1,4 +1,4 @@
-# Play Colmap
+# 3D Reconstruction Playground
 
 A COLMAP playground that runs end to end on a Mac, with no CUDA anywhere: capture a
 dataset with an Android phone, reconstruct it (sparse, then dense on CPU, optionally a
